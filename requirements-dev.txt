@@ -1,0 +1,4 @@
+Flask>=3.0
+asyncua>=2.0
+pytest>=8.0
+ruff>=0.6

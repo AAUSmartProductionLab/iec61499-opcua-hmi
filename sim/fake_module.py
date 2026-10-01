@@ -1,8 +1,10 @@
 """Simulated OPC UA server that serves the address space described by a profile.
 
 Development stand-in for the Eclipse 4diac controller: same nodes, same state
-machines, same error codes, simulated equipment and realistic motion times.
-Variables stay read-only for clients, exactly like the real controller.
+machines (MOD_StateLogic and SKILL_Control of iec61499-mgmt-py), same error
+codes, simulated equipment and realistic motion times. Variables stay read-only
+for clients, and a method answers only when it is called on the object it
+belongs to, exactly like the controller's OPC UA server (open62541).
 """
 
 from __future__ import annotations
@@ -28,9 +30,9 @@ TICK = 0.05
 FAULT_SENSOR = "sensor"
 FAULT_INVARIANT = "invariant"
 
-# A skill that reached its goal goes back to Idle by itself after this pause, so
-# the operator does not have to Abort and Reset it before the next run.
-SUCCESS_DWELL = 1.5
+# A step of a module level skill that finds its equipment held by another skill
+# waits this long for it before it fails with Busy (SL_* WaitFree on the controller).
+WAIT_FREE = 0.5
 
 # The scale has no hardware: the ESP32 publishes a new weight about once a second.
 SCALE_PERIOD = 1.0
@@ -102,7 +104,7 @@ class SkillRuntime:
     started_at: float = 0.0
     deadline: float = 0.0
     timeout_at: float = 0.0
-    idle_at: float = 0.0
+    fail_at: float = 0.0
     stop_requested: bool = False
 
 
@@ -268,10 +270,18 @@ class SimulatedModule:
         callback: Callable[..., Awaitable[list[ua.Variant]]],
         inputs: list[ua.VariantType],
     ) -> None:
+        owner = parent.nodeid
+
+        async def strict(object_id: Any, *args: Any) -> Any:
+            # open62541 checks that the object owns the method; asyncua does not.
+            if object_id != owner:
+                return ua.StatusCode(ua.StatusCodes.BadNodeClassInvalid)
+            return await callback(object_id, *args)
+
         await parent.add_method(
             ua.NodeId(f"{path}/{name}", NS),
             ua.QualifiedName(name, NS),
-            callback,
+            strict,
             [ua.Argument(f"RD_{index + 1}", variant) for index, variant in enumerate(inputs)],
             [
                 ua.Argument("SD_1", ua.VariantType.Boolean),
@@ -293,18 +303,25 @@ class SimulatedModule:
         if state != model.STOPPING:
             self.stopping_started = False
         await self.write("Module/State", state)
+        # Every skill instance follows the module state (SKILL_Control MOD_CHG):
+        # Clearing or Stopped brings an aborted skill or step back to Idle.
+        if state in (model.CLEARING, model.STOPPED):
+            for name, runtime in self.skills.items():
+                if runtime.state == model.SK_ABORTED:
+                    await self.set_skill_state(name, model.SK_IDLE)
+            for key, step in self.steps.items():
+                if step.state == model.SK_ABORTED:
+                    await self.set_step_state(key, model.SK_IDLE, step.error_id)
 
     async def set_skill_state(self, name: str, state: int, error_id: int | None = None) -> None:
         runtime = self.skills[name]
         runtime.state = state
+        # Like SKILL_Control: Start and success clear ErrorID, a failure sets it;
+        # Idle and an abort of an inactive skill keep the last value.
         if error_id is not None:
             runtime.error_id = error_id
-        elif state in (model.SK_RUNNING, model.SK_SUCCEEDED, model.SK_IDLE):
+        elif state in (model.SK_RUNNING, model.SK_SUCCEEDED):
             runtime.error_id = 0
-        if state == model.SK_SUCCEEDED:
-            runtime.idle_at = time.monotonic() + SUCCESS_DWELL
-        elif state != model.SK_SUCCEEDED:
-            runtime.idle_at = 0.0
         await self.write(f"Skills/{name}/State", state)
         await self.write(f"Skills/{name}/ErrorID", runtime.error_id)
 
@@ -359,9 +376,17 @@ class SimulatedModule:
             await self.set_module_state(model.STARTING)
         elif command == "Stop":
             await self.set_module_state(model.STOPPING)
+            # module Stop halts every running skill instance, the steps of a
+            # Resetting procedure that is still going included
             for runtime in self.skills.values():
-                if runtime.state in (model.SK_RUNNING, model.SK_STOPPING):
-                    runtime.stop_requested = True
+                if runtime.state == model.SK_RUNNING:
+                    await self._halt(runtime)
+            resetting = self.procedures.get("Resetting")
+            if resetting is not None and resetting.active:
+                resetting.active = False
+                for key, step in self.steps.items():
+                    if key.startswith("Procedures/Resetting/") and step.state == model.SK_RUNNING:
+                        await self.set_step_state(key, model.SK_FAILED, model.ERR_INTERRUPTED)
             if not self._any_skill_active():
                 await self._begin_stopping_procedure(now)
             else:
@@ -371,9 +396,6 @@ class SimulatedModule:
         elif command == "Clear":
             self.pending_module_state = (now + 0.05, model.STOPPED)
             await self.set_module_state(model.CLEARING)
-            for name, runtime in self.skills.items():
-                if runtime.state == model.SK_ABORTED:
-                    await self.set_skill_state(name, model.SK_IDLE)
         return _answer(True, 0)
 
     def _any_skill_active(self) -> bool:
@@ -394,10 +416,26 @@ class SimulatedModule:
     async def _abort_everything(self, now: float) -> None:
         self.pending_module_state = (now + 0.05, model.ABORTED)
         await self.set_module_state(model.ABORTING)
+        for procedure in self.procedures.values():
+            procedure.active = False
         for name, runtime in self.skills.items():
             if runtime.state != model.SK_ABORTED:
-                runtime.stop_requested = True
-                await self.set_skill_state(name, model.SK_ABORTED, runtime.error_id)
+                await self._abort_skill(runtime)
+        # The steps of sequences and procedures are skill instances as well.
+        for key, step in self.steps.items():
+            if step.state != model.SK_ABORTED:
+                active = step.state in (model.SK_RUNNING, model.SK_STOPPING)
+                await self.set_step_state(
+                    key, model.SK_ABORTED, model.ERR_INTERRUPTED if active else step.error_id
+                )
+
+    async def _abort_skill(self, runtime: SkillRuntime) -> None:
+        active = runtime.state in (model.SK_RUNNING, model.SK_STOPPING)
+        runtime.stop_requested = True
+        runtime.fail_at = 0.0
+        await self.set_skill_state(
+            runtime.name, model.SK_ABORTED, model.ERR_INTERRUPTED if active else None
+        )
 
     def _procedure(self, name: str) -> prof.Procedure | None:
         return next((item for item in self.profile.procedures if item.name == name), None)
@@ -419,7 +457,7 @@ class SimulatedModule:
         step = procedure.steps[runtime.step_index]
         key = f"Procedures/{runtime.name}/{step.name}"
         params = {param.name: param.default for param in step.params}
-        runtime.deadline = time.monotonic() + _duration(BEHAVIOURS.get(step.name), params, self.speed)
+        runtime.deadline = time.monotonic() + _duration(BEHAVIOURS.get(step.runs), params, self.speed)
         self.steps[key].deadline = runtime.deadline
         await self.set_step_state(key, model.SK_RUNNING)
 
@@ -446,25 +484,21 @@ class SimulatedModule:
                 value = values.get(param.name, param.default)
                 if not param.minimum <= value <= param.maximum:
                     return _answer(False, model.ERR_OUT_OF_RANGE)
-            if self._equipment_busy(runtime.equipment, name):
+            # A primitive checks its equipment at Start; a module level skill
+            # does not (its steps find out, and fail with Busy after a wait).
+            if not skill.module_level and self._equipment_busy(runtime.equipment, name):
                 return _answer(False, model.ERR_BUSY)
             await self._start_skill(runtime, values)
             return _answer(True, 0)
         if command == "Stop":
             if runtime.state != model.SK_RUNNING:
                 return _answer(False, model.ERR_NOT_READY)
-            runtime.stop_requested = True
-            if skill.stop_steps and not skill.module_level:
-                await self.set_skill_state(name, model.SK_STOPPING)
-                runtime.phase = "Stopping"
-                runtime.step_index = 0
-                await self._run_skill_step(runtime)
+            await self._halt(runtime)
             return _answer(True, 0)
         if command == "Abort":
             if runtime.state == model.SK_ABORTED:
                 return _answer(False, model.ERR_NOT_READY)
-            runtime.stop_requested = True
-            await self.set_skill_state(name, model.SK_ABORTED)
+            await self._abort_skill(runtime)
             return _answer(True, 0)
         if command == "Reset":
             if runtime.state != model.SK_ABORTED:
@@ -473,18 +507,45 @@ class SimulatedModule:
             return _answer(True, 0)
         return _answer(False, model.ERR_NOT_READY)
 
-    def _equipment_busy(self, equipment: tuple[str, ...], name: str) -> bool:
-        for other_name, other in self.skills.items():
-            if other_name == name or other.state not in (model.SK_RUNNING, model.SK_STOPPING):
-                continue
-            if set(equipment) & set(other.equipment):
-                return True
-        return False
+    def _held(self, runtime: SkillRuntime) -> set[str]:
+        """Equipment an active skill holds (see profiles.held_equipment)."""
+        if runtime.state not in (model.SK_RUNNING, model.SK_STOPPING):
+            return set()
+        return prof.held_equipment(self._skill(runtime.name), runtime.phase or "Execute", runtime.step_index)
+
+    def _equipment_busy(self, equipment: Iterable[str], name: str) -> bool:
+        wanted = set(equipment)
+        return any(
+            wanted & self._held(other)
+            for other_name, other in self.skills.items()
+            if other_name != name
+        )
+
+    async def _halt(self, runtime: SkillRuntime) -> None:
+        """Stop or module Stop: Running -> Stopping, then Failed with Interrupted (7).
+
+        A module level skill halts the step that runs (it fails with 7) and runs
+        its stop sequence, if it has one, while it shows Stopping.
+        """
+        skill = self._skill(runtime.name)
+        runtime.stop_requested = True
+        runtime.fail_at = 0.0
+        if skill.module_level and runtime.phase == "Execute" and runtime.step_index < len(skill.steps):
+            key = f"Skills/{runtime.name}/Execute/{skill.steps[runtime.step_index].name}"
+            await self.set_step_state(key, model.SK_FAILED, model.ERR_INTERRUPTED)
+        await self.set_skill_state(runtime.name, model.SK_STOPPING)
+        if skill.stop_steps:
+            runtime.phase = "Stopping"
+            runtime.step_index = 0
+            await self._run_skill_step(runtime)
+        else:
+            runtime.phase = "Halted"
 
     async def _start_skill(self, runtime: SkillRuntime, values: dict[str, float]) -> None:
         skill = self._skill(runtime.name)
         runtime.params.update(values)
         runtime.stop_requested = False
+        runtime.fail_at = 0.0
         runtime.phase = "Execute"
         runtime.step_index = 0
         now = time.monotonic()
@@ -515,9 +576,12 @@ class SimulatedModule:
         step = steps[runtime.step_index]
         key = f"Skills/{runtime.name}/{runtime.phase}/{step.name}"
         params = {param.name: runtime.params.get(param.name, param.default) for param in step.params}
-        behaviour = BEHAVIOURS.get(step.name)
-        runtime.deadline = time.monotonic() + _duration(behaviour, params, self.speed)
+        behaviour = BEHAVIOURS.get(step.runs)
+        now = time.monotonic()
+        runtime.deadline = now + _duration(behaviour, params, self.speed)
         runtime.timeout_at = runtime.deadline + (behaviour.timeout if behaviour else 8.0) / max(self.speed, 0.01)
+        if runtime.phase == "Execute" and self._equipment_busy(step.uses, runtime.name):
+            runtime.fail_at = now + WAIT_FREE
         self.steps[key].deadline = runtime.deadline
         await self.set_step_state(key, model.SK_RUNNING)
 
@@ -587,27 +651,22 @@ class SimulatedModule:
         await self.set_equipment("Scale", "Weight", self.weight)
 
     def _tick_skill(self, name: str, runtime: SkillRuntime, now: float) -> list[Awaitable[None]]:
-        if runtime.state == model.SK_SUCCEEDED and runtime.idle_at:
-            if now >= runtime.idle_at:
-                runtime.idle_at = 0.0
-                return [self.set_skill_state(name, model.SK_IDLE)]
-            return []
         if runtime.state not in (model.SK_RUNNING, model.SK_STOPPING):
             return []
         skill = self._skill(name)
         work: list[Awaitable[None]] = []
-        if self._invariant_broken(name):
+        if runtime.phase == "Halted":
+            # the brake command went out: the halted skill reports Interrupted
+            runtime.phase = ""
+            work.append(self.set_skill_state(name, model.SK_FAILED, model.ERR_INTERRUPTED))
+            return work
+        if runtime.state == model.SK_RUNNING and self._invariant_broken(name):
             runtime.stop_requested = True
             work.append(self._fail_skill(runtime, model.ERR_INVARIANT))
             return work
-        if runtime.stop_requested and runtime.phase != "Stopping":
-            if skill.stop_steps:
-                runtime.phase = "Stopping"
-                runtime.step_index = 0
-                work.append(self.set_skill_state(name, model.SK_STOPPING))
-                work.append(self._run_skill_step(runtime))
-            else:
-                work.append(self._fail_skill(runtime, model.ERR_INTERRUPTED))
+        if runtime.fail_at and now >= runtime.fail_at:
+            runtime.fail_at = 0.0
+            work.append(self._fail_skill(runtime, model.ERR_BUSY))
             return work
         if skill.module_level:
             work.extend(self._tick_sequence(runtime, now))
@@ -630,9 +689,11 @@ class SimulatedModule:
         work: list[Awaitable[None]] = []
         if now < runtime.deadline:
             return work
+        if runtime.fail_at:
+            return work
         step = steps[runtime.step_index]
         key = f"Skills/{runtime.name}/{runtime.phase}/{step.name}"
-        behaviour = BEHAVIOURS.get(step.name)
+        behaviour = BEHAVIOURS.get(step.runs)
         if behaviour is not None and behaviour.kind == "sensor" and FAULT_SENSOR in self.faults:
             work.append(self._fail_skill(runtime, model.ERR_TIMEOUT))
             return work
@@ -649,14 +710,14 @@ class SimulatedModule:
         return work
 
     async def _fail_skill(self, runtime: SkillRuntime, error_id: int) -> None:
-        if self._skill(runtime.name).module_level:
-            steps = self._skill(runtime.name).stop_steps if runtime.phase == "Stopping" else (
-                self._skill(runtime.name).steps
-            )
+        skill = self._skill(runtime.name)
+        if skill.module_level:
+            steps = skill.stop_steps if runtime.phase == "Stopping" else skill.steps
             if runtime.step_index < len(steps):
                 key = f"Skills/{runtime.name}/{runtime.phase}/{steps[runtime.step_index].name}"
                 if key in self.steps:
                     await self.set_step_state(key, model.SK_FAILED, error_id)
+        runtime.phase = ""
         await self.set_skill_state(runtime.name, model.SK_FAILED, error_id)
 
     def _invariant_broken(self, name: str) -> bool:

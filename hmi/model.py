@@ -168,19 +168,22 @@ MODULE_COMMAND_TARGET: dict[str, int | None] = {
 
 SKILL_STATES_ALLOWED_TO_START = frozenset({SK_IDLE, SK_SUCCEEDED, SK_FAILED})
 
-# --- Diagram of the module state machine ---------------------------------
+# --- Diagrams --------------------------------------------------------------
+#
+# Both machines are the ones the controller runs (iec61499-mgmt-py, ModLib:
+# MOD_StateLogic and SKILL_Control); "SC" is state complete.
 
 MODULE_DIAGRAM: tuple[tuple[int, int, str], ...] = (
     (STOPPED, RESETTING, "Reset"),
     (RESETTING, IDLE, "SC"),
-    (RESETTING, ABORTING, "Abort"),
+    (RESETTING, ABORTING, "Abort, Resetting procedure failed"),
     (IDLE, STARTING, "Start"),
     (STARTING, EXECUTE, "SC"),
     (RESETTING, STOPPING, "Stop"),
     (IDLE, STOPPING, "Stop"),
     (EXECUTE, STOPPING, "Stop"),
     (STOPPING, STOPPED, "SC"),
-    (STOPPING, ABORTING, "Abort"),
+    (STOPPING, ABORTING, "Abort, stop timeout, Stopping procedure failed"),
     (STOPPED, ABORTING, "Abort"),
     (IDLE, ABORTING, "Abort"),
     (EXECUTE, ABORTING, "Abort"),
@@ -199,11 +202,25 @@ SKILL_DIAGRAM: tuple[tuple[int, int, str, str], ...] = (
     (SK_STOPPING, SK_FAILED, "stopped, ErrorID 7", "sc"),
     (SK_IDLE, SK_ABORTED, "Abort, module Abort", "command"),
     (SK_RUNNING, SK_ABORTED, "Abort, module Abort", "command"),
-    (SK_STOPPING, SK_ABORTED, "Abort", "command"),
-    (SK_SUCCEEDED, SK_ABORTED, "Abort", "command"),
-    (SK_FAILED, SK_ABORTED, "Abort", "command"),
-    (SK_ABORTED, SK_IDLE, "Reset, module Clear", "command"),
+    (SK_STOPPING, SK_ABORTED, "Abort, module Abort", "command"),
+    (SK_SUCCEEDED, SK_ABORTED, "Abort, module Abort", "command"),
+    (SK_FAILED, SK_ABORTED, "Abort, module Abort", "command"),
+    (SK_ABORTED, SK_IDLE, "Reset, module Clearing or Stopped", "command"),
 )
+
+# ErrorID keeps its last value in Idle and after an abort of a skill that was
+# not active (the controller clears it only on Start and on success), so it
+# describes the current state only in these states.
+SKILL_STATES_WITH_ERROR = frozenset({SK_FAILED, SK_ABORTED})
+
+
+def shown_error(skill_state: Any, error_id: Any) -> int:
+    """The ErrorID that belongs to the current skill state, else 0."""
+    try:
+        state, code = int(skill_state), int(error_id)
+    except (TypeError, ValueError):
+        return 0
+    return code if state in SKILL_STATES_WITH_ERROR else 0
 
 
 def module_command_enabled(command: str, state: Any, occupant: bool) -> bool:
@@ -226,10 +243,14 @@ def skill_command_enabled(
     module_state: Any,
     occupant: bool,
     parameters_in_range: bool = True,
+    equipment_free: bool = True,
 ) -> bool:
     """Whether a skill command button should be enabled.
 
     Mirrors the acceptance rules of the controller (sections 5 and 10).
+    ``equipment_free`` is False while another skill holds equipment this one
+    needs: the controller refuses a primitive with Busy (6) and lets a module
+    level skill fail with Busy once its step finds the equipment taken.
     """
     if not occupant or command not in SKILL_COMMANDS:
         return False
@@ -242,7 +263,12 @@ def skill_command_enabled(
     except (TypeError, ValueError):
         return False
     if command == "Start":
-        return module == EXECUTE and skill in SKILL_STATES_ALLOWED_TO_START and parameters_in_range
+        return (
+            module == EXECUTE
+            and skill in SKILL_STATES_ALLOWED_TO_START
+            and parameters_in_range
+            and equipment_free
+        )
     if command == "Stop":
         return skill == SK_RUNNING
     if command == "Abort":

@@ -45,10 +45,17 @@ class Step:
     uses: tuple[str, ...] = ()
     params: tuple[Param, ...] = ()
     results: tuple[Param, ...] = ()
+    skill: str = ""
+
+    @property
+    def runs(self) -> str:
+        """The skill primitive the step runs (a step is named after it unless renamed)."""
+        return self.skill or self.name
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
+            "skill": self.runs,
             "label": self.label,
             "uses": list(self.uses),
             "params": [p.to_dict() for p in self.params],
@@ -290,12 +297,14 @@ STOPPERING = ModuleProfile(
                     "Servo to the inner position",
                     ("StopperArm",),
                     (Param("Angle", "deg", 0.0, 180.0, 1.0, step=1.0, digits=1), SETTLE),
+                    skill="MoveArm",
                 ),
                 Step(
                     "ArmOut",
                     "Servo to the outer position",
                     ("StopperArm",),
                     (Param("Angle", "deg", 0.0, 180.0, 121.0, step=1.0, digits=1), SETTLE),
+                    skill="MoveArm",
                 ),
                 Step(
                     "ExtendPlunger",
@@ -328,12 +337,14 @@ STOPPERING = ModuleProfile(
                     "Servo to the middle position",
                     ("StopperArm",),
                     (Param("Angle", "deg", 0.0, 180.0, 90.0, step=1.0, digits=1), SETTLE),
+                    skill="MoveArm",
                 ),
                 Step(
                     "ArmHome",
                     "Servo to the home position",
                     ("StopperArm",),
                     (Param("Angle", "deg", 0.0, 180.0, 120.0, step=1.0, digits=1), SETTLE),
+                    skill="MoveArm",
                 ),
                 Step(
                     "RetractPlunger",
@@ -371,6 +382,27 @@ def get_profile(key: str) -> ModuleProfile:
         return PROFILES[key]
     except KeyError:
         raise KeyError(f"unknown module '{key}', known modules: {', '.join(sorted(PROFILES))}") from None
+
+
+def held_equipment(skill: Skill, phase: str = STEP_GROUP_EXECUTE, index: int = 0) -> set[str]:
+    """Equipment an active skill holds, as the controller locks it.
+
+    A skill primitive holds its equipment while it runs. The steps of a module
+    level skill share the skill's lock token: an equipment is taken by the first
+    step that uses it and released by the last one, so between those steps it
+    stays held (``index`` is the step that runs). After a Stop the skill keeps
+    what it holds until its stop sequence has ended.
+    """
+    if not skill.module_level:
+        return set(skill.uses)
+    if phase != STEP_GROUP_EXECUTE:
+        return set(skill.uses)
+    held: set[str] = set()
+    for equipment in skill.uses:
+        used = [i for i, step in enumerate(skill.steps) if equipment in step.uses]
+        if used and used[0] <= index <= used[-1]:
+            held.add(equipment)
+    return held
 
 
 def step_paths(prefix: str, step: Step, results: Iterable[Param] = ()) -> list[str]:

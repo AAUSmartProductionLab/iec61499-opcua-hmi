@@ -289,6 +289,8 @@ def test_commands_are_refused_without_the_occupation(client):
     )
     assert view(client, "filling", stranger)["occupier"] is False
     assert view(client, "filling", stranger)["commands"]["Reset"] is False
+    texts = [entry["text"] for entry in client.get("/api/log?limit=20").get_json()["entries"]]
+    assert any("Module/Reset: refused" in text and "NotPermitted" in text for text in texts), texts
 
 
 def test_occupy_release_cycle(client):
@@ -335,6 +337,8 @@ def test_parameters_out_of_range_are_not_sent(client):
     refused(result, model.ERR_OUT_OF_RANGE)
     assert result["sent"] is False
     assert "Duration" in result["problem"]
+    texts = [entry["text"] for entry in client.get("/api/log?limit=20").get_json()["entries"]]
+    assert any("not sent" in text and "OutOfRange" in text for text in texts), texts
 
 
 def test_primitive_skill_moves_equipment_and_succeeds(client):
@@ -413,7 +417,9 @@ def test_composite_skill_drives_its_steps_not_the_standalone_skills(client, simu
 
 def test_the_needle_end_switches_are_never_both_true(client):
     to_execute(client, "filling")
-    sensors = lambda: view(client, "filling")["sensors"]
+    def sensors():
+        return view(client, "filling")["sensors"]
+
     assert sensors()["AtTop"]["value"] is True
     assert sensors()["AtBottom"]["value"] is False
 
@@ -469,19 +475,64 @@ def test_tare_zeroes_the_scale_and_weigh_reports_it(client):
     assert weight < 5.0, weight
 
 
-def test_a_succeeded_skill_returns_to_idle_by_itself(client):
+def test_a_succeeded_skill_stays_succeeded_and_starts_again(client):
+    """As on the controller: no way back to Idle but Abort and Reset; Start runs it again."""
     to_execute(client, "stoppering")
     idle_skill(client, "stoppering", "MoveArm")
-    accepted(skill_command(client, "stoppering", "MoveArm", "Start", {"Angle": 120, "Settle": 1}))
+    accepted(skill_command(client, "stoppering", "MoveArm", "Start", {"Angle": 120, "Settle": 0.5}))
     wait_skill(client, "stoppering", "MoveArm", "Succeeded")
-    assert wait_for(
-        lambda: view(client, "stoppering")["skills"]["MoveArm"]["stateName"] == "Idle", timeout=15
-    ), "a succeeded skill did not return to Idle"
+    time.sleep(2.0)
     skill = view(client, "stoppering")["skills"]["MoveArm"]
+    assert skill["stateName"] == "Succeeded"
     assert skill["commands"]["Start"] is True
     assert skill["commands"]["Reset"] is False
-    accepted(skill_command(client, "stoppering", "MoveArm", "Start", {"Angle": 60, "Settle": 1}))
+    accepted(skill_command(client, "stoppering", "MoveArm", "Start", {"Angle": 60, "Settle": 0.5}))
+    wait_skill(client, "stoppering", "MoveArm", "Running", timeout=5)
     wait_skill(client, "stoppering", "MoveArm", "Succeeded")
+
+
+def test_stop_passes_stopping_and_fails_with_interrupted(client):
+    to_execute(client, "stoppering")
+    idle_skill(client, "stoppering", "ExtendPlunger")
+    accepted(skill_command(client, "stoppering", "ExtendPlunger", "Start", {"Duration": 8}))
+    wait_skill(client, "stoppering", "ExtendPlunger", "Running")
+    accepted(skill_command(client, "stoppering", "ExtendPlunger", "Stop"))
+    skill = wait_skill(client, "stoppering", "ExtendPlunger", "Failed", timeout=5)
+    assert skill["errorId"] == model.ERR_INTERRUPTED
+    refused(skill_command(client, "stoppering", "ExtendPlunger", "Stop"), model.ERR_NOT_READY)
+
+
+def test_an_old_error_is_not_shown_once_the_skill_is_idle_again(client, simulator):
+    """The controller keeps ErrorID after Abort and Reset; the page shows it only where it belongs."""
+    to_execute(client, "stoppering")
+    idle_skill(client, "stoppering", "RetractPlunger")
+    accepted(skill_command(client, "stoppering", "RetractPlunger", "Start", {"Duration": 8}))
+    accepted(skill_command(client, "stoppering", "RetractPlunger", "Abort"))
+    skill = wait_skill(client, "stoppering", "RetractPlunger", "Aborted")
+    assert skill["errorId"] == model.ERR_INTERRUPTED
+    accepted(skill_command(client, "stoppering", "RetractPlunger", "Reset"))
+    skill = wait_skill(client, "stoppering", "RetractPlunger", "Idle")
+    assert simulator.module("stoppering").skills["RetractPlunger"].error_id == model.ERR_INTERRUPTED
+    assert skill["errorId"] == 0
+    assert skill["errorText"] == ""
+
+
+def test_a_module_level_skill_locks_the_equipment_of_its_steps(client):
+    to_execute(client, "stoppering")
+    for skill in ("Stoppering", "LowerPiston", "MoveArm", "ExtendPlunger"):
+        idle_skill(client, "stoppering", skill)
+    accepted(skill_command(client, "stoppering", "Stoppering", "Start"))
+    wait_skill(client, "stoppering", "Stoppering", "Running")
+    module = view(client, "stoppering")
+    # the piston is held from the first step to the last
+    assert module["skills"]["LowerPiston"]["heldBy"] == ["Stoppering"]
+    assert module["skills"]["LowerPiston"]["commands"]["Start"] is False
+    refused(skill_command(client, "stoppering", "LowerPiston", "Start"), model.ERR_BUSY)
+    accepted(skill_command(client, "stoppering", "Stoppering", "Abort"))
+    wait_skill(client, "stoppering", "Stoppering", "Aborted")
+    assert view(client, "stoppering")["skills"]["LowerPiston"]["heldBy"] == []
+    accepted(skill_command(client, "stoppering", "Stoppering", "Reset"))
+    wait_skill(client, "stoppering", "Stoppering", "Idle")
 
 
 def test_start_is_refused_while_the_skill_is_still_running(client):
@@ -590,8 +641,6 @@ def test_log_contains_refusals_and_failures(client):
     entries = response.get_json()["entries"]
     texts = [entry["text"] for entry in entries]
     assert any("refused" in text for text in texts)
-    assert any("NotPermitted" in text for text in texts)
-    assert any("OutOfRange" in text for text in texts)
     assert any("Timeout" in text for text in texts), texts
     assert any(entry["level"] in ("warn", "error") for entry in entries)
 

@@ -23,6 +23,8 @@ const state = {
   config: null,
   ui: {},
   active: null,
+  logClearedAt: 0,
+  logShown: '',
 };
 
 function childList(children) {
@@ -158,7 +160,9 @@ function buildSkillCard(moduleKey, skill, send) {
   const paramsBox = el('div', { class: 'params' });
   const inputs = new Map();
   for (const param of skill.params) {
-    const row = paramRow(param);
+    const row = paramRow(param, (name, value, bad) => {
+      if (bad) buttons.Start.disabled = true;
+    });
     paramsBox.appendChild(row);
     inputs.set(param.name, row.querySelector('input'));
   }
@@ -181,6 +185,7 @@ function buildSkillCard(moduleKey, skill, send) {
     box.appendChild(button);
   }
   const miniDiagram = window.HmiDiagrams.miniSkillSvg(state.config, null);
+  const uses = el('div', { class: 'uses' });
   const hint = el('p', { class: 'skill-hint' });
   const caption = el('p', { class: 'skill-caption' });
   const card = {
@@ -206,7 +211,7 @@ function buildSkillCard(moduleKey, skill, send) {
         el('h2', { text: 'Stopping' }), el('span', { text: 'stop sequence' }),
       ]) : null,
       stopSteps ? stopSteps.node : null,
-      el('div', { class: 'uses', text: skill.uses.length ? `uses: ${skill.uses.join(', ')}` : '' }),
+      uses,
       hint,
       box,
     ]),
@@ -214,6 +219,8 @@ function buildSkillCard(moduleKey, skill, send) {
     errorLine,
     hint,
     caption,
+    uses,
+    usesText: skill.uses.join(', '),
     inputs,
     buttons,
     steps,
@@ -421,10 +428,15 @@ function updateSkill(ui, skillName, skill) {
   if (card.caption.textContent !== caption) card.caption.textContent = caption;
   const hint = link ? HINTS[shown.stateName] || '' : (HINTS[skill.stateName] || '');
   if (card.hint.textContent !== hint) card.hint.textContent = hint;
+  const badInput = Array.from(card.inputs.values()).some((input) => input.classList.contains('bad'));
   for (const command of ['Start', 'Stop', 'Abort', 'Reset']) {
-    const enabled = link && command === 'Start' ? false : skill.commands[command];
+    const enabled = command === 'Start' ? skill.commands.Start && !link && !badInput : skill.commands[command];
     card.buttons[command].disabled = !enabled;
   }
+  const held = skill.heldBy && skill.heldBy.length ? ` - held by ${skill.heldBy.join(', ')}` : '';
+  const usesText = card.usesText ? `uses: ${card.usesText}${held}` : '';
+  if (card.uses.textContent !== usesText) card.uses.textContent = usesText;
+  card.uses.classList.toggle('held', Boolean(held));
   card.steps.update(skill.steps);
   if (card.stopSteps) card.stopSteps.update(skill.stopSteps);
   const wanted = new Set();
@@ -459,19 +471,24 @@ function setPill(pill, module) {
 }
 
 /**
- * A composite (module level) skill does not touch the standalone skill
- * variables of the steps it runs, only its own step variables. So while a
- * composite runs, the primitive skill that the current step uses shows the
- * state of that step, straight from the controller's subscription.
+ * A composite (module level) skill runs private instances of its skill
+ * primitives and does not touch the standalone skill variables, only its own
+ * step variables. So while a composite runs (or runs its stop sequence), the
+ * primitive that the current step runs (ArmIn runs MoveArm) shows the state of
+ * that step, straight from the controller's subscription.
  */
 function activeSteps(module) {
   const links = new Map();
   for (const [name, skill] of Object.entries(module.skills)) {
-    if (!skill.moduleLevel || skill.stateName !== 'Running') continue;
-    for (const step of skill.steps) {
-      if (step.stateName !== 'Running' && step.stateName !== 'Stopping') continue;
-      if (module.skills[step.name]) {
-        links.set(step.name, { parent: name, index: step.index, step });
+    if (!skill.moduleLevel || (skill.stateName !== 'Running' && skill.stateName !== 'Stopping')) continue;
+    const groups = [['', skill.steps], ['stop ', skill.stopSteps || []]];
+    for (const [prefix, steps] of groups) {
+      for (const step of steps) {
+        if (step.stateName !== 'Running' && step.stateName !== 'Stopping') continue;
+        const primitive = step.skill || step.name;
+        if (module.skills[primitive]) {
+          links.set(primitive, { parent: name, index: `${prefix}${step.index}`, step });
+        }
       }
     }
   }
@@ -526,15 +543,21 @@ function updateModule(ui, module) {
 
 function renderLog(entries) {
   const box = document.getElementById('log');
+  const shown = entries.filter((entry) => entry.ts > state.logClearedAt).slice(-120);
+  const key = shown.length ? `${shown.length}:${shown[shown.length - 1].ts}` : '';
+  if (key === state.logShown) return;
+  state.logShown = key;
+  // Follow new entries only while the operator is at the end of the log.
+  const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
   box.textContent = '';
-  for (const entry of entries.slice(-120)) {
+  for (const entry of shown) {
     box.appendChild(el('li', {}, [
       el('span', { class: 't', text: entry.time }),
       el('span', { class: 'm', text: entry.module }),
       el('span', { class: entry.level, text: entry.text }),
     ]));
   }
-  box.scrollTop = box.scrollHeight;
+  if (atEnd) box.scrollTop = box.scrollHeight;
 }
 
 async function poll() {
@@ -564,6 +587,9 @@ async function boot() {
   state.config = await api('/api/config');
   renderConfig(state.config);
   document.getElementById('clear-log').addEventListener('click', () => {
+    // The log lives in the HMI service; hide what is there now, keep what comes.
+    state.logClearedAt = Date.now() / 1000;
+    state.logShown = null;
     document.getElementById('log').textContent = '';
   });
   poll();

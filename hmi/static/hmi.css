@@ -187,6 +187,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .results { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; color: var(--muted); }
 .results b { color: var(--text); font-size: 14px; }
 .uses { color: var(--idle); font-size: 11px; margin-top: 6px; }
+.uses .held { color: var(--warn); }
 .skill-hint { color: var(--muted); font-size: 11px; margin: 4px 0 0; min-height: 14px; }
 
 .steps { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
@@ -215,6 +216,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 
 .log-panel { margin: 0 20px 28px; }
 .log { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow: auto; font-size: 12px; }
+.log-panel .panel-head .ghost + .ghost { margin-left: 6px; }
 .log li { display: grid; grid-template-columns: 60px 90px 1fr; gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--line); }
 .log .t { color: var(--idle); font-family: Consolas, monospace; }
 .log .m { color: var(--muted); }
@@ -238,7 +240,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .diagram-panel .panel-head { margin-bottom: 0; }
 .diagram { width: 100%; height: auto; display: block; }
 .module-diagram { max-width: 1180px; }
-.mini-skill-diagram { max-width: 300px; margin: 8px 0; }
+.mini-skill-diagram { max-width: 320px; margin: 8px 0; }
 
 .diagram .state-box { fill: var(--panel); stroke: var(--frame-line); stroke-width: 1.5; }
 .diagram .state.acts .state-box { fill: var(--state-act); stroke: var(--state-act-line); }
@@ -263,6 +265,8 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .diagram .note-box { fill: var(--panel); stroke: var(--frame-line); stroke-width: 1; }
 .diagram .note-label { font: 11px "Segoe UI", system-ui, sans-serif; fill: var(--muted); }
 .diagram .diagram-frame { fill: var(--frame); stroke: var(--frame-line); stroke-width: 1.5; }
+.diagram .diagram-frame.superstate { stroke-dasharray: 5 4; }
+.mini-skill-diagram .command-label { font-size: 11px; }
 .diagram .frame-label { font: 600 14px "Segoe UI", system-ui, sans-serif; fill: var(--frame-text); }
 .diagram .frame-note { font: 11px "Segoe UI", system-ui, sans-serif; fill: var(--frame-text); }
 .diagram .legend-label { font: 12px "Segoe UI", system-ui, sans-serif; fill: var(--muted); }

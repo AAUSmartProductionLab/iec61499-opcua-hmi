@@ -137,3 +137,25 @@ def test_unknown_module_key():
         assert "filling" in str(error)
     else:
         raise AssertionError("expected a KeyError")
+
+def test_steps_name_the_primitive_they_run():
+    steps = {step.name: step.runs for step in prof.STOPPERING.skills[-1].steps}
+    assert steps["ArmIn"] == steps["ArmOut"] == "MoveArm"
+    assert steps["LowerPiston"] == "LowerPiston"
+    resetting = {step.name: step.runs for step in prof.STOPPERING.procedures[0].steps}
+    assert resetting["ArmMiddle"] == resetting["ArmHome"] == "MoveArm"
+
+
+def test_a_module_level_skill_holds_equipment_from_its_first_to_its_last_use():
+    dispensing = next(s for s in prof.FILLING.skills if s.name == "Dispensing")
+    held = [prof.held_equipment(dispensing, "Execute", i) for i in range(len(dispensing.steps))]
+    assert held == [{"NeedleAxis"}, {"NeedleAxis"}, {"NeedleAxis"}, {"Scale"}]
+    assert prof.held_equipment(dispensing, "Stopping", 0) == {"NeedleAxis", "Scale"}
+    stoppering = next(s for s in prof.STOPPERING.skills if s.name == "Stoppering")
+    held = [prof.held_equipment(stoppering, "Execute", i) for i in range(len(stoppering.steps))]
+    assert all("Piston" in item for item in held)
+    assert [("StopperArm" in item, "Plunger" in item) for item in held] == [
+        (False, False), (True, False), (True, False), (False, True), (False, True), (False, False)
+    ]
+    weigh = next(s for s in prof.FILLING.skills if s.name == "Weigh")
+    assert prof.held_equipment(weigh) == {"Scale"}

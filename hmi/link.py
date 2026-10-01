@@ -25,7 +25,11 @@ from .profiles import ModuleProfile
 LOGGER = logging.getLogger(__name__)
 
 CALL_TIMEOUT = 10.0
-SILENCE_LIMIT = 6.0
+# The controller only notifies changes, and a module that stands still changes
+# nothing. After this long without a notification the link reads one value to
+# prove the connection still answers; it does not reconnect because of silence.
+SILENCE_LIMIT = 5.0
+PROBE_TIMEOUT = 5.0
 WATCHDOG_INTERVAL = 1.0
 
 
@@ -144,6 +148,7 @@ class OpcuaLink:
         self._stop_event: asyncio.Event | None = None
         self._call_lock: asyncio.Lock | None = None
         self._nodes: dict[str, dict[str, Node]] = {}
+        self._parents: dict[str, dict[str, Node]] = {}
         self._roots: dict[str, Node] = {}
         self._stopping = False
         self._listeners: list[Callable[[bool], None]] = []
@@ -259,15 +264,27 @@ class OpcuaLink:
         with self._lock:
             channels = dict(self.channels)
         nodes: dict[str, dict[str, Node]] = {}
+        parents: dict[str, dict[str, Node]] = {}
         roots: dict[str, Node] = {}
         for key, channel in channels.items():
             profile = channel.profile
             root = await self._resolve_root(client, profile)
             roots[key] = root
             resolved: dict[str, Node] = {}
+            owners: dict[str, Node] = {}
             missing: list[str] = []
-            for path in prof.monitored_paths(profile) + prof.method_paths(profile):
+            for path in prof.monitored_paths(profile):
                 try:
+                    resolved[path] = await root.get_child(prof.browse_path(path))
+                except (UaError, ValueError) as exc:
+                    missing.append(f"{path} ({type(exc).__name__})")
+            # A method is called on the object it belongs to: the controller's
+            # server (open62541) refuses any other object with BadNodeClassInvalid.
+            for path in prof.method_paths(profile):
+                parent_path = path.rsplit("/", 1)[0]
+                try:
+                    if parent_path not in owners:
+                        owners[parent_path] = await root.get_child(prof.browse_path(parent_path))
                     resolved[path] = await root.get_child(prof.browse_path(path))
                 except (UaError, ValueError) as exc:
                     missing.append(f"{path} ({type(exc).__name__})")
@@ -276,12 +293,14 @@ class OpcuaLink:
                 channel.missing = missing
                 channel.available = not missing
             nodes[key] = resolved
+            parents[key] = owners
             if missing:
                 self._append_log(
                     f"{profile.title}: {len(missing)} node(s) missing: {', '.join(missing[:6])}"
                 )
         with self._lock:
             self._nodes = nodes
+            self._parents = parents
             self._roots = roots
 
     async def _resolve_root(self, client: Client, profile: ModuleProfile) -> Node:
@@ -332,10 +351,12 @@ class OpcuaLink:
                 await client.check_connection()
                 with self._lock:
                     silence = time.monotonic() - self.state.last_notification
-                if silence > SILENCE_LIMIT:
-                    raise UaError(
-                        f"no data change notification for {silence:.0f}s, assuming a lost connection"
-                    )
+                if silence > SILENCE_LIMIT and variables:
+                    # Quiet is normal for a module at rest: prove the server
+                    # still answers with one read instead of reconnecting.
+                    await asyncio.wait_for(variables[0][2].read_value(), timeout=PROBE_TIMEOUT)
+                    with self._lock:
+                        self.state.last_notification = time.monotonic()
         finally:
             try:
                 await subscription.delete()
@@ -346,12 +367,13 @@ class OpcuaLink:
         assert self._call_lock is not None
         with self._lock:
             node = self._nodes.get(module_key, {}).get(path)
-        if node is None:
+            parent = self._parents.get(module_key, {}).get(path.rsplit("/", 1)[0])
+        if node is None or parent is None:
             return CallResult(ok=False, transport_error=f"node '{path}' is not resolved")
         variants = [self._to_variant(arg) for arg in args]
         async with self._call_lock:
             try:
-                answers = await node.call_method(node.nodeid, *variants)
+                answers = await parent.call_method(node.nodeid, *variants)
             except (UaError, OSError, ConnectionError) as exc:
                 return CallResult(ok=False, transport_error=f"{type(exc).__name__}: {exc}")
         accepted, error_id = _unpack_answer(answers)
@@ -384,6 +406,7 @@ class OpcuaLink:
     def _clear_channels(self) -> None:
         with self._lock:
             self._nodes = {}
+            self._parents = {}
             self._roots = {}
             self.state.connected = False
             self.state.last_notification = time.monotonic()

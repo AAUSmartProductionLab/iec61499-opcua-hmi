@@ -20,7 +20,8 @@ from .profiles import ModuleProfile, Param
 
 LOGGER = logging.getLogger(__name__)
 
-LOG_LIMIT = 200
+LOG_LIMIT = 500
+WATCH_INTERVAL = 0.1
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,7 @@ class Operator:
     occupies: dict[str, bool] = field(default_factory=dict)
     params: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)
     seen: float = field(default_factory=time.time)
+    probed: set[str] = field(default_factory=set)
 
     def skill_params(self, module_key: str, skill: str, defaults: Iterable[Param]) -> dict[str, float]:
         module_params = self.params.setdefault(module_key, {})
@@ -73,6 +75,8 @@ class HmiService:
         self._operators: dict[str, Operator] = {}
         self._last_states: dict[str, dict[str, Any]] = {}
         self._reassert_lock = threading.Lock()
+        self._watch_stop = threading.Event()
+        self._watcher: threading.Thread | None = None
         self.links: dict[str, OpcuaLink] = {}
         for endpoint, module_configs in self._grouped().items():
             link = OpcuaLink(endpoint, [config.profile for config in module_configs], sampling_ms)
@@ -101,10 +105,29 @@ class HmiService:
     def start(self) -> None:
         for link in self.links.values():
             link.start()
+        if self._watcher is None and self.configs:
+            self._watch_stop.clear()
+            self._watcher = threading.Thread(target=self._watch_loop, name="transitions", daemon=True)
+            self._watcher.start()
 
     def stop(self) -> None:
+        self._watch_stop.set()
+        if self._watcher is not None:
+            self._watcher.join(timeout=2)
+            self._watcher = None
         for link in self.links.values():
             link.stop()
+
+    def _watch_loop(self) -> None:
+        """Log transitions as they come, whether or not a page is open."""
+        while not self._watch_stop.wait(WATCH_INTERVAL):
+            for config in self.configs:
+                channel = self.link_for(config.profile.key).channels[config.profile.key]
+                values = {path: entry["value"] for path, entry in channel.snapshot().items()}
+                try:
+                    self._watch_transitions(config.profile, values)
+                except Exception:  # noqa: BLE001
+                    LOGGER.exception("transition watch failed")
 
     # --- operators -------------------------------------------------------
 
@@ -145,6 +168,28 @@ class HmiService:
                 self._note_occupation_result(module_key, session, result, holds=True, reassert=True)
         finally:
             self._reassert_lock.release()
+
+    def _probe_occupation(self, session: str, module_key: str) -> None:
+        """Ask once whether this session still owns an occupied module.
+
+        The controller publishes only Occupied, never the owner. After a restart
+        of the HMI the browser comes back with its stored session id; Occupy is
+        accepted only for the owner, so it tells without taking anything.
+        """
+        link = self.link_for(module_key)
+        result = link.call(module_key, "Occupation/Occupy", [session])
+        if not result.ok:
+            with self._lock:
+                operator = self._operators.get(session)
+                if operator is not None:
+                    operator.probed.discard(module_key)
+            return
+        with self._lock:
+            operator = self._operators.get(session)
+            if operator is not None:
+                operator.occupies[module_key] = result.accepted
+        if result.accepted:
+            self.log(module_key, "info", "occupation of this session taken back")
 
     def _note_occupation_result(
         self,
@@ -352,8 +397,18 @@ class HmiService:
         entries = channel.snapshot()
         values = {path: entry["value"] for path, entry in entries.items()}
         statuses = {path: entry["status"] for path, entry in entries.items()}
-        self._watch_transitions(profile, values)
+        occupied = bool(values.get("Occupation/Occupied"))
+        if connected and occupied and profile.key not in operator.occupies:
+            with self._lock:
+                probe = profile.key not in operator.probed
+                operator.probed.add(profile.key)
+            if probe:
+                threading.Thread(
+                    target=self._probe_occupation, args=(operator.session, profile.key),
+                    name="probe-occupation", daemon=True,
+                ).start()
         occupier = operator.occupies.get(profile.key, False)
+        holders = _equipment_holders(profile, values)
         module_state = values.get("Module/State")
         view: dict[str, Any] = {
             "key": profile.key,
@@ -363,7 +418,7 @@ class HmiService:
             "stale": not connected,
             "missing": list(channel.missing),
             "detail": link_state["detail"],
-            "occupied": bool(values.get("Occupation/Occupied")),
+            "occupied": occupied,
             "occupier": occupier,
             "moduleState": {
                 "value": module_state,
@@ -387,8 +442,14 @@ class HmiService:
         for skill in profile.skills:
             base = f"Skills/{skill.name}"
             skill_state = values.get(f"{base}/State")
-            error_id = _as_int(values.get(f"{base}/ErrorID"))
+            error_id = model.shown_error(skill_state, values.get(f"{base}/ErrorID"))
             stored = operator.skill_params(profile.key, skill.name, skill.params)
+            blocked = sorted({
+                holder
+                for equipment in skill.uses
+                for holder in holders.get(equipment, ())
+                if holder != skill.name
+            })
             view["skills"][skill.name] = {
                 "state": skill_state,
                 "stateName": model.skill_state_name(skill_state),
@@ -396,6 +457,7 @@ class HmiService:
                 "errorId": error_id,
                 "errorText": model.error_text(error_id) if error_id else "",
                 "moduleLevel": skill.module_level,
+                "heldBy": blocked,
                 "params": {
                     param.name: {"stored": stored[param.name], **param.to_dict()} for param in skill.params
                 },
@@ -414,6 +476,7 @@ class HmiService:
                         module_state,
                         occupier,
                         parameters_in_range=_params_in_range(skill.params, stored),
+                        equipment_free=not blocked,
                     )
                     for command in model.SKILL_COMMANDS
                 },
@@ -485,11 +548,12 @@ def _step_view(
     for index, step in enumerate(steps, start=1):
         path = f"{prefix}/{step.name}"
         state = values.get(f"{path}/State")
-        error_id = _as_int(values.get(f"{path}/ErrorID"))
+        error_id = model.shown_error(state, values.get(f"{path}/ErrorID"))
         view.append(
             {
                 "index": index,
                 "name": step.name,
+                "skill": step.runs,
                 "label": step.label,
                 "uses": list(step.uses),
                 "state": state,
@@ -505,6 +569,32 @@ def _step_view(
             }
         )
     return view
+
+
+def _current_step(steps: Iterable[prof.Step], prefix: str, values: dict[str, Any]) -> int | None:
+    """Index of the step that runs now, None between two steps."""
+    for index, step in enumerate(steps):
+        if _as_int(values.get(f"{prefix}/{step.name}/State")) in (model.SK_RUNNING, model.SK_STOPPING):
+            return index
+    return None
+
+
+def _equipment_holders(profile: ModuleProfile, values: dict[str, Any]) -> dict[str, set[str]]:
+    """Which active skill holds which equipment, from the skill and step states."""
+    holders: dict[str, set[str]] = {}
+    for skill in profile.skills:
+        base = f"Skills/{skill.name}"
+        state = _as_int(values.get(f"{base}/State"))
+        if state not in (model.SK_RUNNING, model.SK_STOPPING):
+            continue
+        held = set(skill.uses)
+        if skill.module_level and state == model.SK_RUNNING:
+            index = _current_step(skill.steps, f"{base}/{prof.STEP_GROUP_EXECUTE}", values)
+            if index is not None:
+                held = prof.held_equipment(skill, prof.STEP_GROUP_EXECUTE, index)
+        for equipment in held:
+            holders.setdefault(equipment, set()).add(skill.name)
+    return holders
 
 
 def _params_in_range(params: Iterable[Param], param_values: dict[str, float]) -> bool:

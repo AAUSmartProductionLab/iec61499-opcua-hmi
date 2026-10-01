@@ -180,45 +180,65 @@ const edges = [
   root.appendChild(svgText(
     'Stop: from Resetting, Idle, Execute (drawn from Execute).  '
     + 'Abort: from Stopped, Resetting, Idle, Execute, Stopping (drawn from Execute).',
-    { x: 12, y: 332, class: 'frame-note' },
+    { x: 12, y: 316, class: 'frame-note' },
+  ));
+  root.appendChild(svgText(
+    'Aborting also follows a failed Resetting or Stopping procedure, and Stopping '
+    + 'when the skills have not ended within the stop timeout.',
+    { x: 12, y: 334, class: 'frame-note' },
   ));
   return root;
 }
 
 
 /*
- * The reduced skill machine as the operator sees it: one action runs the skill,
- * and every end state falls back to Idle. Stopping is left out on purpose, it is
- * too short to see and the machine clears itself (see the simulator).
+ * The skill machine of the controller (SKILL_Control): Start from Idle,
+ * Succeeded or Failed; Stop passes Stopping and ends in Failed (ErrorID 7).
+ * Abort leaves any state but Aborted, drawn as one transition out of the
+ * frame around those states; Reset (or the module in Clearing or Stopped)
+ * brings an aborted skill back to Idle. Nothing else returns to Idle.
  */
 const MINI_BOX = { w: 78, h: 26 };
 const MINI_POSITIONS = {
-  0: [4, 52],    // Idle
-  1: [100, 52],  // Running
-  3: [204, 8],   // Succeeded
-  4: [100, 100], // Failed
-  5: [196, 100], // Aborted
+  0: [12, 58],    // Idle
+  1: [124, 58],   // Running
+  2: [124, 110],  // Stopping
+  3: [236, 12],   // Succeeded
+  4: [236, 110],  // Failed
+  5: [124, 170],  // Aborted
 };
+// The states that Abort leaves, inside the dashed frame.
+const MINI_ABORTABLE = [0, 1, 2, 3, 4];
+const MINI_FRAME = { x: 4, y: 4, w: 318, h: 144 };
+// [from, to, path, label]; from 'frame' is the transition out of the frame.
+const MINI_EDGES = [
+  [0, 1, 'M90,71 H124', ''],
+  [3, 1, 'M246,38 Q232,52 202,62', ''],
+  [4, 1, 'M246,110 Q232,96 202,80', ''],
+  [1, 3, 'M180,58 Q200,26 236,24', ''],
+  [1, 4, 'M180,84 Q200,124 236,122', ''],
+  [1, 2, 'M163,84 V110', ''],
+  [2, 4, 'M202,123 H236', ''],
+  ['frame', 5, 'M163,148 V170', 'Abort'],
+  [5, 0, 'M124,183 H51 V84', 'Reset'],
+];
 
 function miniSkillSvg(config, current) {
   const root = svgEl('svg', {
-    viewBox: '0 0 292 150', class: 'diagram mini-skill-diagram',
+    viewBox: '0 0 326 202', class: 'diagram mini-skill-diagram',
     preserveAspectRatio: 'xMidYMid meet',
   });
   root.appendChild(defs());
+  root.appendChild(svgEl('rect', {
+    x: MINI_FRAME.x, y: MINI_FRAME.y, width: MINI_FRAME.w, height: MINI_FRAME.h,
+    rx: 10, class: 'diagram-frame superstate',
+  }));
   const states = config.skillStates;
   const kinds = config.skillStateKinds;
-  const edges = [
-    ['M82,65 H100', '', 'sc', 0, 0, 1],
-    ['M139,59 L204,21', '', 'sc', 0, 0, 3],
-    ['M139,78 V100', '', 'sc', 0, 0, 4],
-    ['M160,78 H235 V100', '', 'sc', 0, 0, 5],
-    ['M204,21 Q130,-10 43,52', '', 'sc', 0, 0, 0],
-    ['M100,113 Q45,140 25,78', '', 'sc', 0, 0, 0],
-    ['M196,113 Q110,158 55,78', '', 'sc', 0, 0, 0],
-  ];
-  for (const [path, label, style, x, y, into] of edges) {
-    root.appendChild(edge(path, label, style, x, y).group);
+  for (const [, into, path, label] of MINI_EDGES) {
+    const style = label ? 'command' : 'sc';
+    const [lx, ly] = label === 'Abort' ? [163, 159] : [88, 183];
+    root.appendChild(edge(path, label, style, lx, ly).group);
     if (!root.getAttribute(`data-into-${into}`)) {
       root.setAttribute(`data-into-${into}`, path);
     }

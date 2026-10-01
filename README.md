@@ -19,8 +19,8 @@ Both modules described in the specification documents are supported:
 pip install -r requirements.txt
 
 # against the real controller
-python run.py --modules filling --endpoint-filling opc.tcp://192.168.0.191:4840
-python run.py --modules stoppering --endpoint-stoppering opc.tcp://<second-pi>:4840
+python run.py --modules filling --endpoint filling=opc.tcp://192.168.0.191:4840
+python run.py --modules stoppering --endpoint stoppering=opc.tcp://<second-pi>:4840
 python run.py --modules filling,stoppering --endpoint filling=opc.tcp://192.168.0.191:4840
 
 # without the machine: the simulator serves the same address space
@@ -69,34 +69,51 @@ tests/                 unit tests and end to end tests against the simulator
   looked up in namespace index 1 first and by browsing if that fails.
 * **Subscriptions, not polling.** All variables are monitored with one
   subscription (sampling 100-250 ms). The browser polls the Flask snapshot every
-  250 ms, which never touches the controller.
+  250 ms, which never touches the controller. The controller notifies changes
+  only, so a module at rest is quiet: after 5 s without a notification the link
+  reads one value to prove the connection, and reconnects only if that fails.
+* **Methods are called on their object.** `Occupation/Occupy` is called on the
+  `Occupation` object, `Skills/Weigh/Start` on `Skills/Weigh`. The controller's
+  OPC UA server (open62541) refuses any other object with `BadNodeClassInvalid`;
+  the simulator does the same, so the tests catch it.
 * **Methods only.** Nothing is written to the controller; every command is a
   method call, one at a time, and `Accepted` is always evaluated (the OPC UA
   status is `Good` even when the command is refused).
 * **One session id.** The browser creates a UUID, keeps it in local storage and
   sends it with every call. After a reconnect the HMI calls `Occupy` again with
-  that id and takes the module back if nobody else has it.
+  that id and takes the module back if nobody else has it. After a restart of the
+  HMI it asks once with `Occupy` whether the session still owns an occupied
+  module (the controller accepts that only for the owner).
 * **Reset follows the specification.** `Reset` is accepted only from `Aborted`
   (opcua-filling.md / opcua-stoppering.md, skill command table), so the button
   is enabled there only; a skill in `Succeeded` or `Failed` is re-run with
   `Start`, which needs no `Reset`. Each skill card states which applies in its
   current state, so the greyed button is never a dead end.
+* **Equipment locks.** A skill holds its equipment while it runs; a module level
+  skill holds an equipment from the first step that uses it to the last one, as
+  the controller's lock tokens do. Start of a skill that needs held equipment is
+  disabled and the card says who holds it.
+* **Errors where they belong.** The controller keeps `ErrorID` after Abort and
+  Reset; the page shows it only for `Failed` and `Aborted`.
 * **Stale values are shown as stale.** On connection loss all values are marked
   stale and every command is disabled; the page reconnects by itself.
 * **Transitions are logged.** Every refused command with its ErrorID and text,
-  and every skill that ends as Failed, goes to the message log.
+  and every skill that ends as Failed, goes to the message log, whether or not a
+  page is open.
 * **A composite skill links its primitives.** A module level skill such as
   `Dispensing` or `Stoppering` does not write the standalone variables of the
   skills it runs, only its own step variables. While such a skill is Running, the
   primitive skill card of the current step is marked, shows the step's state and
   its diagram, and its `Start` is disabled because the composite holds the
-  equipment. Everything comes from the same subscription as everything else.
+  equipment. The step names the primitive it runs (`ArmIn` runs `MoveArm`), and
+  the steps of a stop sequence are linked as well. Everything comes from the same subscription as everything else.
 * **State machine drawings.** The module state machine (PackML) is drawn in the
   PackML style: blue acting states, orange wait states, PackML command bubbles on
-  the lines and `SC` for state complete. Every skill card carries the reduced
-  skill machine: `Idle → Running`, the three end states `Succeeded`, `Failed` and
-  `Aborted`, and a return to `Idle` from each of them. `Stopping` is left out on
-  purpose, it is too short to see and the machine clears itself. No box is painted
+  the lines and `SC` for state complete. Every skill card carries the skill machine
+  of the controller (`SKILL_Control`): `Start` from `Idle`, `Succeeded` or `Failed`;
+  `Stop` through `Stopping` to `Failed` (ErrorID 7); `Abort` from every state in
+  the dashed frame to `Aborted`; `Reset` (or the module in `Clearing` or
+  `Stopped`) back to `Idle`. Nothing else returns to `Idle`. No box is painted
   over: the current state breathes, and a dot travels along the transition it just
   came through. The page has a light theme by default and a dark theme; the button
   in the header switches and remembers the choice, and `?theme=dark` in the URL
@@ -135,6 +152,12 @@ python -m pytest -q
 `tests/test_model.py` and `tests/test_profiles.py` check the state machines,
 error codes, button rules and the address space against the specification
 documents, including that every state of both machines appears in the diagrams.
+`tests/test_controller_sync.py` reads a checkout of iec61499-mgmt-py next to this
+one (or `IEC61499_MGMT_PY`) and checks the profiles against the module specs in
+`cell/modules`, the state and error numbers against `modgen`, and the command
+rules and the skill diagram against the generated `MOD_StateLogic` and
+`SKILL_Control`; it is skipped without that checkout. `tests/test_link.py` checks
+the method calls and a quiet connection.
 `tests/test_integration.py` and `tests/test_reconnect.py` start the simulator and
 drive the whole API: occupy/release, reset/start/execute, skill starts, equipment
 locks, abort and clear, refusals with their ErrorID, the sequences and a
@@ -144,10 +167,12 @@ controller restart with automatic re-occupation.
 
 `sim/fake_module.py` builds the address space from the same profiles as the
 client, so node names, types and defaults always match. It implements both state
-machines, the occupation, the equipment locks, realistic motion times and the
-documented refusals. A skill that reached its goal returns to `Idle` by itself
-after a short pause, as a machine that clears itself would; `Failed` and
-`Aborted` stay until the next command. The needle axis is a single axis: its two
+machines as the controller runs them, the occupation, the equipment locks,
+realistic motion times and the documented refusals. As on the controller, a skill
+stays in `Succeeded` or `Failed` until the next Start or Abort, a Stop passes
+`Stopping` and ends in `Failed` with Interrupted (7), a module Abort aborts every
+skill and step, and a module level skill accepts Start and fails with Busy (6)
+when a step finds its equipment held. The needle axis is a single axis: its two
 end switches are never both on, which is why a move does not succeed at once. The
 scale has no hardware, so a random weight is published about once per second and
 `Tare` brings it back to zero. It is a development and test aid, not a

@@ -142,22 +142,31 @@ def test_skill_diagram_covers_every_state_and_documented_transitions():
         assert expected in pairs
 
 
-def test_skill_diagram_covers_every_state_in_the_small_drawing():
-    """The drawn machine is the simplified one: no Stopping box."""
-    assert set(MINI_SKILL_POSITIONS) == {0, 1, 3, 4, 5}
-    assert model.SK_STOPPING not in MINI_SKILL_POSITIONS
+def _drawn_skill_edges() -> set[tuple[int, int]]:
+    """(from, to) of the skill drawing, Abort out of the frame expanded to its states."""
+    frame = [int(code) for code in re.search(
+        r"const MINI_ABORTABLE = \[([\d,\s]+)\]", DIAGRAM_SOURCE).group(1).split(",")]
+    block = DIAGRAM_SOURCE.split("const MINI_EDGES = [", 1)[1].split("];", 1)[0]
+    pairs: set[tuple[int, int]] = set()
+    for source, target in re.findall(r"\[\s*('frame'|\d+)\s*,\s*(\d+)\s*,", block):
+        sources = frame if source == "'frame'" else [int(source)]
+        pairs.update((code, int(target)) for code in sources)
+    return pairs
 
 
-def test_small_skill_drawing_sends_every_end_state_back_to_idle():
-    mini = DIAGRAM_SOURCE.split("function miniSkillSvg", 1)[1]
-    block = mini.split("const edges = [", 1)[1].split("];", 1)[0]
-    routes = re.findall(r"\['([^']+)',\s*'',\s*'sc',\s*0,\s*0,\s*(\d+)\]", block)
-    ends = {code for _, code in routes if code != "0"}
-    assert ends == {"1", "3", "4", "5"}
-    returns = [path.strip() for path, target in routes if target == "0"]
-    assert len(returns) == 3, f"expected three returns to Idle, got {returns}"
-    for path in returns:
-        assert path.endswith(("52", "78")), path
+def test_small_skill_drawing_has_every_state_of_the_controller():
+    assert set(MINI_SKILL_POSITIONS) == set(model.SKILL_STATES)
+
+
+def test_small_skill_drawing_is_the_controller_machine():
+    """Every transition of SKILL_Control is drawn, and nothing else."""
+    assert _drawn_skill_edges() == {(source, target) for source, target, _, _ in model.SKILL_DIAGRAM}
+
+
+def test_only_reset_returns_to_idle():
+    assert {source for source, target in _drawn_skill_edges() if target == model.SK_IDLE} == {
+        model.SK_ABORTED
+    }
 
 
 def test_small_skill_drawing_has_no_overlapping_boxes():
@@ -190,3 +199,16 @@ def test_skill_state_kinds_match_the_command_table():
 def test_module_state_kinds_are_known():
     for code in model.MODULE_STATES:
         assert model.MODULE_STATE_KIND[code] in ("acts", "waits")
+
+def test_error_is_shown_only_in_the_states_it_describes():
+    assert model.shown_error(model.SK_FAILED, model.ERR_TIMEOUT) == model.ERR_TIMEOUT
+    assert model.shown_error(model.SK_ABORTED, model.ERR_INTERRUPTED) == model.ERR_INTERRUPTED
+    for state in (model.SK_IDLE, model.SK_RUNNING, model.SK_STOPPING, model.SK_SUCCEEDED):
+        assert model.shown_error(state, model.ERR_INTERRUPTED) == 0
+    assert model.shown_error(None, 3) == 0
+
+
+def test_start_needs_free_equipment():
+    assert not model.skill_command_enabled(
+        "Start", model.SK_IDLE, model.EXECUTE, True, equipment_free=False
+    )

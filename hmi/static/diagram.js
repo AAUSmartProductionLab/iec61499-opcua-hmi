@@ -96,7 +96,14 @@ function setActive(root, code) {
 
 function commandBox(value, x, y) {
   const width = Math.max(40, value.length * 6.8 + 14);
-  const group = svgEl('g', { class: 'command' });
+  // A command on the drawing is its button; setCommands enables it.
+  const group = svgEl('g', {
+    class: 'command disabled', 'data-command': value, role: 'button',
+    'aria-label': value, 'aria-disabled': 'true', tabindex: '-1',
+  });
+  const title = svgEl('title');
+  title.textContent = value;
+  group.appendChild(title);
   group.appendChild(svgEl('rect', {
     x: x - width / 2, y: y - 10, width, height: 20, rx: 10, class: 'command-box',
   }));
@@ -264,4 +271,36 @@ function miniSkillSvg(config, current) {
   return root;
 }
 
-window.HmiDiagrams = { moduleSvg, miniSkillSvg, setActive };
+/* Pressing a command on a drawing: onPress(command) for an enabled one. */
+function bindCommands(root, onPress) {
+  const press = (target) => {
+    const group = target && target.closest ? target.closest('.command') : null;
+    if (!group || !root.contains(group) || group.getAttribute('aria-disabled') !== 'false') return;
+    onPress(group.getAttribute('data-command'));
+  };
+  root.addEventListener('click', (event) => press(event.target));
+  root.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    press(event.target);
+  });
+}
+
+/* Enable or disable the commands named in `enabled` ({Start: true, ...}). */
+function setCommands(root, enabled, why) {
+  for (const group of root.querySelectorAll('.command[data-command]')) {
+    const command = group.getAttribute('data-command');
+    if (!(command in enabled)) continue;
+    const on = Boolean(enabled[command]);
+    const title = on ? command : `${command}: ${why || 'not possible in this state'}`;
+    const label = group.querySelector('title');
+    if (label.textContent !== title) label.textContent = title;
+    if (group.getAttribute('aria-disabled') === String(!on)) continue;
+    group.setAttribute('aria-disabled', String(!on));
+    group.setAttribute('tabindex', on ? '0' : '-1');
+    group.classList.toggle('enabled', on);
+    group.classList.toggle('disabled', !on);
+  }
+}
+
+window.HmiDiagrams = { moduleSvg, miniSkillSvg, setActive, bindCommands, setCommands };

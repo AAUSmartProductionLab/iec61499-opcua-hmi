@@ -161,7 +161,7 @@ function buildSkillCard(moduleKey, skill, send) {
   const inputs = new Map();
   for (const param of skill.params) {
     const row = paramRow(param, (name, value, bad) => {
-      if (bad) buttons.Start.disabled = true;
+      if (bad) window.HmiDiagrams.setCommands(miniDiagram, { Start: false }, 'a parameter is out of range');
     });
     paramsBox.appendChild(row);
     inputs.set(param.name, row.querySelector('input'));
@@ -169,22 +169,12 @@ function buildSkillCard(moduleKey, skill, send) {
   const resultsBox = el('div', { class: 'results' });
   const steps = stepsList(skill.steps);
   const stopSteps = skill.stopSteps.length ? stepsList(skill.stopSteps) : null;
-  const buttons = {};
-  const box = el('div', { class: 'buttons' });
-  for (const command of ['Start', 'Stop', 'Abort', 'Reset']) {
-    const classes = { Start: 'go', Stop: 'stop', Abort: 'danger', Reset: '' };
-    const button = el('button', {
-      type: 'button', class: classes[command], text: command,
-      onclick: () => {
-        const params = {};
-        for (const [name, input] of inputs) params[name] = Number(input.value);
-        send({ module: moduleKey, skill: skill.name, command, params });
-      },
-    });
-    buttons[command] = button;
-    box.appendChild(button);
-  }
   const miniDiagram = window.HmiDiagrams.miniSkillSvg(state.config, null);
+  window.HmiDiagrams.bindCommands(miniDiagram, (command) => {
+    const params = {};
+    for (const [name, input] of inputs) params[name] = Number(input.value);
+    send({ module: moduleKey, skill: skill.name, command, params });
+  });
   const uses = el('div', { class: 'uses' });
   const hint = el('p', { class: 'skill-hint' });
   const caption = el('p', { class: 'skill-caption' });
@@ -213,7 +203,6 @@ function buildSkillCard(moduleKey, skill, send) {
       stopSteps ? stopSteps.node : null,
       uses,
       hint,
-      box,
     ]),
     stateBadge,
     errorLine,
@@ -222,7 +211,6 @@ function buildSkillCard(moduleKey, skill, send) {
     uses,
     usesText: skill.uses.join(', '),
     inputs,
-    buttons,
     steps,
     stopSteps,
     miniDiagram,
@@ -247,17 +235,13 @@ function buildModule(profile) {
 
   const moduleDiagram = window.HmiDiagrams.moduleSvg(state.config, null);
 
-  const commandButtons = {};
-  const commandBox = el('div', { class: 'command-buttons' });
-  for (const command of ['Reset', 'Start', 'Stop', 'Abort', 'Clear']) {
-    const classes = { Reset: 'go', Start: 'primary go', Stop: 'stop', Abort: 'danger', Clear: '' };
-    const button = el('button', {
-      type: 'button', class: classes[command], text: `Module ${command}`,
-      onclick: () => api('/api/module-command', { module: profile.key, command }).catch(() => {}),
-    });
-    commandButtons[command] = button;
-    commandBox.appendChild(button);
-  }
+  window.HmiDiagrams.bindCommands(moduleDiagram, (command) => {
+    api('/api/module-command', { module: profile.key, command })
+      .then((result) => {
+        if (result.ok && !result.accepted) toast(`${result.errorText}`, true);
+      })
+      .catch(() => {});
+  });
 
   const sensorBox = el('div', { class: 'sensors' });
   const sensorNodes = new Map();
@@ -309,7 +293,6 @@ function buildModule(profile) {
       el('div', { class: 'panel control-box' }, [
         el('div', { class: 'control-label', text: 'Module controls' }),
         el('div', { class: 'control-status' }, [moduleStateText]),
-        commandBox,
         missingLine,
       ]),
     ]),
@@ -367,7 +350,6 @@ function buildModule(profile) {
     occupyButton,
     releaseButton,
     moduleDiagram,
-    commandButtons,
     moduleStateText,
     missingLine,
     sensorNodes,
@@ -415,7 +397,7 @@ function selectModule(key) {
   }
 }
 
-function updateSkill(ui, skillName, skill) {
+function updateSkill(ui, module, skillName, skill) {
   const card = ui.cards.get(skillName);
   if (!card) return;
   const link = ui.links.get(skillName);
@@ -429,10 +411,12 @@ function updateSkill(ui, skillName, skill) {
   const hint = link ? HINTS[shown.stateName] || '' : (HINTS[skill.stateName] || '');
   if (card.hint.textContent !== hint) card.hint.textContent = hint;
   const badInput = Array.from(card.inputs.values()).some((input) => input.classList.contains('bad'));
-  for (const command of ['Start', 'Stop', 'Abort', 'Reset']) {
-    const enabled = command === 'Start' ? skill.commands.Start && !link && !badInput : skill.commands[command];
-    card.buttons[command].disabled = !enabled;
-  }
+  const commands = { ...skill.commands, Start: skill.commands.Start && !link && !badInput };
+  let why = 'not possible in this state';
+  if (!module.occupier) why = 'occupy the module first';
+  else if (badInput) why = 'a parameter is out of range';
+  else if (link) why = `it runs as a step of ${link.parent}`;
+  window.HmiDiagrams.setCommands(card.miniDiagram, commands, why);
   const held = skill.heldBy && skill.heldBy.length ? ` - held by ${skill.heldBy.join(', ')}` : '';
   const usesText = card.usesText ? `uses: ${card.usesText}${held}` : '';
   if (card.uses.textContent !== usesText) card.uses.textContent = usesText;
@@ -502,9 +486,10 @@ function updateModule(ui, module) {
   const stateText = `Module state: ${module.moduleState.name}` +
     (module.moduleState.status !== 'Good' ? ` (${module.moduleState.status})` : '');
   if (ui.moduleStateText.textContent !== stateText) ui.moduleStateText.textContent = stateText;
-  for (const [command, button] of Object.entries(ui.commandButtons)) {
-    button.disabled = !module.commands[command];
-  }
+  window.HmiDiagrams.setCommands(
+    ui.moduleDiagram, module.commands,
+    module.occupier ? 'not possible in this state' : 'occupy the module first',
+  );
   ui.occupyButton.disabled = !module.occupation.occupy;
   ui.releaseButton.disabled = !module.occupation.release;
   const occText = module.occupier
@@ -534,7 +519,7 @@ function updateModule(ui, module) {
   }
 
   ui.links = activeSteps(module);
-  for (const [name, skill] of Object.entries(module.skills)) updateSkill(ui, name, skill);
+  for (const [name, skill] of Object.entries(module.skills)) updateSkill(ui, module, name, skill);
   for (const [name, procedure] of Object.entries(module.procedures)) {
     const view = ui.procedureViews.get(name);
     if (view) view.update(procedure.steps);

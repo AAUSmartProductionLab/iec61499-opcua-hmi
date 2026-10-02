@@ -265,6 +265,14 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .diagram .arrowhead { fill: var(--edge); }
 .diagram .command-box { fill: var(--command); stroke: var(--command-line); stroke-width: 1.4; }
 .diagram .command-label { font: 600 12px "Segoe UI", system-ui, sans-serif; fill: var(--command-text); }
+.diagram .command { outline: none; }
+.diagram .command.enabled { cursor: pointer; }
+.diagram .command.enabled .command-box { stroke-width: 1.8; }
+.diagram .command.enabled:hover .command-box,
+.diagram .command.enabled:focus-visible .command-box { stroke: var(--accent); stroke-width: 2.6; }
+.diagram .command.enabled:active .command-box { fill: var(--command-line); }
+.diagram .command.disabled { opacity: .38; }
+.diagram .command .command-label { pointer-events: none; }
 .diagram .note-box { fill: var(--panel); stroke: var(--frame-line); stroke-width: 1; }
 .diagram .note-label { font: 11px "Segoe UI", system-ui, sans-serif; fill: var(--muted); }
 .diagram .diagram-frame { fill: var(--frame); stroke: var(--frame-line); stroke-width: 1.5; }

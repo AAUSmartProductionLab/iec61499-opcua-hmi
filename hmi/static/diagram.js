@@ -62,6 +62,7 @@ function stateBox(spec, x, y, width, height, active, code) {
 }
 
 const MARKER_RADIUS = 3.5;
+const DOT_SECONDS = 0.4;
 
 /**
  * Show the current state without painting over it: the box of the current state
@@ -84,16 +85,19 @@ function setActive(root, code) {
     (item) => String(item.to) === String(code) && item.from.some((from) => String(from) === previous),
   );
   if (!route) return;
+  // One dot per drawing: a fast skill changes state again before the last dot arrived.
+  for (const old of root.querySelectorAll('.state-dot')) old.remove();
   const dot = svgEl('circle', { r: MARKER_RADIUS, class: 'state-dot' });
   const motion = svgEl('animateMotion', {
-    dur: '0.9s', begin: 'indefinite', path: route.path, fill: 'remove', rotate: 'auto', calcMode: 'linear',
+    dur: `${DOT_SECONDS}s`, begin: 'indefinite', path: route.path, fill: 'remove', rotate: 'auto',
+    calcMode: 'linear',
   });
   dot.appendChild(motion);
   root.appendChild(dot);
   // The animation runs on the drawing's own timeline, which started at load:
   // start it now, and take the dot away when it has arrived.
   motion.addEventListener('endEvent', () => dot.remove());
-  setTimeout(() => dot.remove(), 1500);
+  setTimeout(() => dot.remove(), DOT_SECONDS * 1000 + 300);
   motion.beginElement();
 }
 

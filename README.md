@@ -120,9 +120,10 @@ tests/                 unit tests and end to end tests against the simulator
   leaves a dashed frame around them: module Stop from the inner frame, module
   Abort from the outer one; skill Start from the frame around `Idle`, `Succeeded`
   and `Failed`, skill Abort from the frame around every state but `Aborted`.
-  `Stop` passes `Stopping` and ends in `Failed` (ErrorID 7), and only `Reset` (or
-  the module in `Clearing` or `Stopped`) returns a skill to `Idle`, as in
-  `SKILL_Control`. Every line has its own lane, which `tests/test_model.py`
+  `Stop` passes `Stopping` and ends in `Failed` (ErrorID 7); a skill that
+  succeeded returns to `Idle` by itself after 1.5 s, and `Reset` (or the module in
+  `Clearing` or `Stopped`) brings an aborted one back, as in `SKILL_Control`. The
+  dot follows the line from the previous state. Every line has its own lane, which `tests/test_model.py`
   checks: no line through a box or across another line. No box is painted
   over: the current state breathes, and a small orange dot travels along the
   transition it just came through. The page has a light theme by default and a dark theme; the button
@@ -181,7 +182,8 @@ client, so node names, types and defaults always match. It implements both state
 machines as the controller runs them, the occupation, the equipment locks,
 the equipment of `cell/modules/filling.yaml` and `stoppering.yaml` and the documented
 refusals. As on the controller, a skill
-stays in `Succeeded` or `Failed` until the next Start or Abort, a Stop passes
+returns from `Succeeded` to `Idle` after 1.5 s (steps too), stays in `Failed`
+until the next Start or Abort, a Stop passes
 `Stopping` and ends in `Failed` with Interrupted (7), a module Abort aborts every
 skill and step, and a module level skill accepts Start and fails with Busy (6)
 when a step finds its equipment held; a Stop leaves the steps of a sequence or of

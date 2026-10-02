@@ -8,17 +8,70 @@ from hmi import model
 DIAGRAM_SOURCE = (Path(__file__).resolve().parents[1] / "hmi" / "static" / "diagram.js").read_text(
     encoding="utf-8"
 )
-_MINI_BLOCK = DIAGRAM_SOURCE.split("const MINI_POSITIONS = {", 1)[1].split("};", 1)[0]
-MINI_SKILL_POSITIONS = {
-    int(code): (int(x), int(y))
-    for code, x, y in re.findall(r"^\s+(\d+):\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]", _MINI_BLOCK, re.M)
-}
-MINI_SKILL_HEIGHT = int(
-    re.search(r"const MINI_BOX = \{ w: \d+, h: (\d+) \}", DIAGRAM_SOURCE).group(1)
-)
-MINI_SKILL_WIDTH = int(
-    re.search(r"const MINI_BOX = \{ w: (\d+), h: \d+ \}", DIAGRAM_SOURCE).group(1)
-)
+FRAME_MEMBER = re.compile(r"\{ name: '(\w+)'.*?members: \[([\d,\s]+)\]")
+EDGE = re.compile(r"\[\s*('\w+'|\d+),\s*(\d+),\s*'([^']*)',\s*'([^']*)',\s*(\d+),\s*(\d+)\]")
+
+
+def drawing(name: str) -> dict:
+    """Positions, box size, frames and edges of a machine drawn in diagram.js."""
+    block = DIAGRAM_SOURCE.split(f"const {name} = {{", 1)[1].split("\n};", 1)[0]
+    width, height = (int(v) for v in re.search(r"box: \{ w: (\d+), h: (\d+) \}", block).groups())
+    positions = {
+        int(code): (int(x), int(y))
+        for code, x, y in re.findall(r"^\s+(\d+): \[(\d+), (\d+)\]", block, re.M)
+    }
+    frames = {
+        frame: [int(code) for code in members.split(",")]
+        for frame, members in FRAME_MEMBER.findall(block)
+    }
+    edges = [
+        (src.strip("'") if src.startswith("'") else int(src), int(dst), path, label, int(x), int(y))
+        for src, dst, path, label, x, y in EDGE.findall(block)
+    ]
+    return {"w": width, "h": height, "positions": positions, "frames": frames, "edges": edges}
+
+
+def drawn_pairs(machine: dict) -> set[tuple[int, int]]:
+    pairs: set[tuple[int, int]] = set()
+    for src, dst, *_ in machine["edges"]:
+        sources = machine["frames"][src] if isinstance(src, str) else [src]
+        pairs.update((code, dst) for code in sources)
+    return pairs
+
+
+def segments(path: str) -> list[tuple[float, float, float, float]]:
+    """Straight segments of an M/H/V path."""
+    out, x, y = [], 0.0, 0.0
+    for cmd, value in re.findall(r"([MHV])\s*([\d.,]+)", path):
+        if cmd == "M":
+            x, y = (float(v) for v in value.split(","))
+        elif cmd == "H":
+            out.append((x, y, float(value), y))
+            x = float(value)
+        else:
+            out.append((x, y, x, float(value)))
+            y = float(value)
+    return out
+
+
+def hits(segment, box) -> bool:
+    """Whether a segment runs through the inside of a box (touching its border is fine)."""
+    x1, y1, x2, y2 = segment
+    left, top, right, bottom = box
+    lo_x, hi_x, lo_y, hi_y = min(x1, x2), max(x1, x2), min(y1, y2), max(y1, y2)
+    return lo_x < right - 1 and hi_x > left + 1 and lo_y < bottom - 1 and hi_y > top + 1
+
+
+def boxes(machine: dict) -> dict[int, tuple[int, int, int, int]]:
+    return {
+        code: (x, y, x + machine["w"], y + machine["h"])
+        for code, (x, y) in machine["positions"].items()
+    }
+
+
+def bubble(label: str, x: int, y: int) -> tuple[float, float, float, float]:
+    width = max(40, len(label) * 6.8 + 14)
+    return (x - width / 2, y - 10, x + width / 2, y + 10)
 
 
 def test_module_state_names():
@@ -142,51 +195,63 @@ def test_skill_diagram_covers_every_state_and_documented_transitions():
         assert expected in pairs
 
 
-def _drawn_skill_edges() -> set[tuple[int, int]]:
-    """(from, to) of the skill drawing, Abort out of the frame expanded to its states."""
-    frame = [int(code) for code in re.search(
-        r"const MINI_ABORTABLE = \[([\d,\s]+)\]", DIAGRAM_SOURCE).group(1).split(",")]
-    block = DIAGRAM_SOURCE.split("const MINI_EDGES = [", 1)[1].split("];", 1)[0]
-    pairs: set[tuple[int, int]] = set()
-    for source, target in re.findall(r"\[\s*('frame'|\d+)\s*,\s*(\d+)\s*,", block):
-        sources = frame if source == "'frame'" else [int(source)]
-        pairs.update((code, int(target)) for code in sources)
-    return pairs
+def test_drawings_have_every_state_of_the_controller():
+    assert set(drawing("MODULE")["positions"]) == set(model.MODULE_STATES)
+    assert set(drawing("SKILL")["positions"]) == set(model.SKILL_STATES)
 
 
-def test_small_skill_drawing_has_every_state_of_the_controller():
-    assert set(MINI_SKILL_POSITIONS) == set(model.SKILL_STATES)
+def test_drawings_are_the_controller_machines():
+    """Every transition of MOD_StateLogic and SKILL_Control is drawn, and nothing else."""
+    assert drawn_pairs(drawing("MODULE")) == {(a, b) for a, b, _ in model.MODULE_DIAGRAM}
+    assert drawn_pairs(drawing("SKILL")) == {(a, b) for a, b, _, _ in model.SKILL_DIAGRAM}
 
 
-def test_small_skill_drawing_is_the_controller_machine():
-    """Every transition of SKILL_Control is drawn, and nothing else."""
-    assert _drawn_skill_edges() == {(source, target) for source, target, _, _ in model.SKILL_DIAGRAM}
+def test_only_reset_returns_a_skill_to_idle():
+    assert {a for a, b in drawn_pairs(drawing("SKILL")) if b == model.SK_IDLE} == {model.SK_ABORTED}
 
 
-def test_only_reset_returns_to_idle():
-    assert {source for source, target in _drawn_skill_edges() if target == model.SK_IDLE} == {
-        model.SK_ABORTED
-    }
+def test_every_command_is_written_on_its_line():
+    labels = {e[3] for e in drawing("SKILL")["edges"] if e[3]}
+    assert labels == {"Start", "Stop", "Abort", "Reset"}
+    labels = {e[3] for e in drawing("MODULE")["edges"] if e[3]}
+    assert labels == set(model.MODULE_COMMANDS)
 
 
-def test_small_skill_drawing_has_no_overlapping_boxes():
-    boxes = {
-        code: (x, y, x + MINI_SKILL_WIDTH, y + MINI_SKILL_HEIGHT)
-        for code, (x, y) in MINI_SKILL_POSITIONS.items()
-    }
-    codes = sorted(boxes)
-    for index, first in enumerate(codes):
-        for second in codes[index + 1:]:
-            left, right = boxes[first], boxes[second]
-            apart_x = right[0] >= left[2] or left[0] >= right[2]
-            apart_y = right[1] >= left[3] or left[1] >= right[3]
-            assert apart_x or apart_y, f"states {first} and {second} overlap"
-
-
-def test_small_skill_drawing_leaves_room_between_running_and_idle():
-    idle = MINI_SKILL_POSITIONS[model.SK_IDLE]
-    running = MINI_SKILL_POSITIONS[model.SK_RUNNING]
-    assert running[0] - (idle[0] + MINI_SKILL_WIDTH) >= 15, "the arrow is too short"
+def test_drawings_are_tidy():
+    """No box on a box, no line through a box or across another line, no label on a foreign line."""
+    for name in ("MODULE", "SKILL"):
+        machine = drawing(name)
+        states = boxes(machine)
+        codes = sorted(states)
+        for i, a in enumerate(codes):
+            for b in codes[i + 1:]:
+                left, right = states[a], states[b]
+                assert right[0] >= left[2] or left[0] >= right[2] or right[1] >= left[3] \
+                    or left[1] >= right[3], f"{name}: states {a} and {b} overlap"
+        labels = [(i, bubble(label, x, y)) for i, (_, _, _, label, x, y) in enumerate(machine["edges"]) if label]
+        for i, (src, dst, path, label, x, y) in enumerate(machine["edges"]):
+            for segment in segments(path):
+                for code, box in states.items():
+                    assert not hits(segment, box), f"{name}: {path} runs through state {code}"
+                for j, box in labels:
+                    if j != i:
+                        assert not hits(segment, box), f"{name}: {path} runs through a label"
+            for j, (_, _, other, _, _, _) in enumerate(machine["edges"]):
+                if j <= i:
+                    continue
+                for s1 in segments(path):
+                    for s2 in segments(other):
+                        horizontal, vertical = (s1, s2) if s1[1] == s1[3] else (s2, s1)
+                        if horizontal[1] != horizontal[3] or vertical[0] != vertical[2]:
+                            continue
+                        crosses = (min(horizontal[0], horizontal[2]) < vertical[0] < max(horizontal[0], horizontal[2])
+                                   and min(vertical[1], vertical[3]) < horizontal[1] < max(vertical[1], vertical[3]))
+                        assert not crosses, f"{name}: {path} crosses {other}"
+        for a, (_, box_a) in enumerate(labels):
+            for _, box_b in labels[a + 1:]:
+                assert not hits(box_a, box_b), f"{name}: labels overlap"
+            for code, box in states.items():
+                assert not hits(box_a, box), f"{name}: label on state {code}"
 
 
 def test_skill_state_kinds_match_the_command_table():

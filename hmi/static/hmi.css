@@ -266,6 +266,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .diagram .note-label { font: 11px "Segoe UI", system-ui, sans-serif; fill: var(--muted); }
 .diagram .diagram-frame { fill: var(--frame); stroke: var(--frame-line); stroke-width: 1.5; }
 .diagram .diagram-frame.superstate { stroke-dasharray: 5 4; }
+.diagram .superstate-label { font: 600 10px "Segoe UI", system-ui, sans-serif; letter-spacing: .08em; fill: var(--frame-text); }
 .mini-skill-diagram .command-label { font-size: 11px; }
 .diagram .frame-label { font: 600 14px "Segoe UI", system-ui, sans-serif; fill: var(--frame-text); }
 .diagram .frame-note { font: 11px "Segoe UI", system-ui, sans-serif; fill: var(--frame-text); }

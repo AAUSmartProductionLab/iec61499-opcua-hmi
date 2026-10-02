@@ -123,132 +123,134 @@ function edge(path, label, style, x, y, into) {
   return { group, path, into };
 }
 
-const MODULE_BOX = { w: 124, h: 46 };
-const MODULE_POSITIONS = {
-  2: [880, 150],   // Stopped
-  15: [40, 54],    // Resetting
-  3: [250, 150],   // Starting
-  4: [40, 150],    // Idle
-  6: [460, 150],   // Execute
-  7: [670, 150],   // Stopping
-  8: [460, 266],   // Aborting
-  9: [670, 266],   // Aborted
-  1: [880, 266],   // Clearing
+/*
+ * Shared drawing of a state machine: dashed frames for the states a command
+ * applies to, the edges, then the state boxes on top. An edge is
+ * [from, to, path, label, labelX, labelY]; from is a state code or the name of
+ * a frame (the command leaves every state in it); a labelled edge is a command,
+ * an unlabelled one is state complete.
+ */
+function drawMachine(root, config, machine) {
+  for (const frame of machine.frames) {
+    root.appendChild(svgEl('rect', {
+      x: frame.x, y: frame.y, width: frame.w, height: frame.h, rx: 10,
+      class: 'diagram-frame superstate',
+    }));
+    if (frame.label) {
+      root.appendChild(svgText(frame.label, {
+        x: frame.x + 12, y: frame.y + 15, class: 'superstate-label',
+      }));
+    }
+  }
+  for (const [, into, path, label, x, y] of machine.edges) {
+    root.appendChild(edge(path, label, label ? 'command' : 'sc', x, y).group);
+    if (!root.getAttribute(`data-into-${into}`)) root.setAttribute(`data-into-${into}`, path);
+  }
+  for (const [code, [x, y]] of Object.entries(machine.positions)) {
+    root.appendChild(stateBox(
+      { name: nameOf(config.states, code, code), kind: kindOf(config.kinds, code, 'waits') },
+      x, y, machine.box.w, machine.box.h, false, code,
+    ));
+  }
+}
+
+/*
+ * The module machine (MOD_StateLogic). Row one runs from Stopped to Execute,
+ * Stopping and the abort row return to Stopped along their own lanes. Stop is
+ * accepted in the inner frame, Abort in the outer one; Starting sits inside
+ * both but passes at once, so neither applies to it.
+ */
+const MODULE = {
+  box: { w: 124, h: 46 },
+  positions: {
+    2: [40, 84],     // Stopped
+    15: [260, 84],   // Resetting
+    4: [480, 84],    // Idle
+    3: [700, 84],    // Starting
+    6: [920, 84],    // Execute
+    7: [920, 190],   // Stopping
+    8: [700, 290],   // Aborting
+    9: [480, 290],   // Aborted
+    1: [260, 290],   // Clearing
+  },
+  frames: [
+    { name: 'abort', label: 'ABORT', x: 16, y: 30, w: 1058, h: 222, members: [2, 15, 4, 6, 7] },
+    { name: 'stop', label: 'STOP', x: 236, y: 58, w: 824, h: 86, members: [15, 4, 6] },
+  ],
+  edges: [
+    [2, 15, 'M164,107 H260', 'Reset', 200, 107],
+    [15, 4, 'M384,107 H480', '', 0, 0],
+    [4, 3, 'M604,107 H700', 'Start', 652, 107],
+    [3, 6, 'M824,107 H920', '', 0, 0],
+    ['stop', 7, 'M982,144 V190', 'Stop', 982, 167],
+    [7, 2, 'M920,213 H124 V130', '', 0, 0],
+    ['abort', 8, 'M762,252 V290', 'Abort', 762, 271],
+    [8, 9, 'M700,313 H604', '', 0, 0],
+    [9, 1, 'M480,313 H384', 'Clear', 432, 313],
+    [1, 2, 'M260,313 H80 V130', '', 0, 0],
+  ],
 };
 
 function moduleSvg(config, current) {
   const root = svgEl('svg', {
-    viewBox: '0 0 1120 348', class: 'diagram module-diagram',
+    viewBox: '0 0 1090 372', class: 'diagram module-diagram',
     preserveAspectRatio: 'xMidYMid meet',
   });
   root.appendChild(defs());
-  root.appendChild(svgEl('rect', {
-    x: 8, y: 34, width: 1104, height: 176, rx: 12, class: 'diagram-frame',
+  root.appendChild(svgText('Module state machine (PackML)', { x: 16, y: 18, class: 'frame-label' }));
+  drawMachine(root, { states: config.moduleStates, kinds: config.moduleStateKinds }, MODULE);
+  root.appendChild(svgText('also after a failed procedure or the stop timeout', {
+    x: 790, y: 275, class: 'frame-note',
   }));
-  root.appendChild(svgText('Module state machine (PackML)', {
-    x: 12, y: 16, class: 'frame-label',
-  }));
-
-  const states = config.moduleStates;
-  const kinds = config.moduleStateKinds;
-const edges = [
-    ['M960,150 V24 H102 V54', 'Reset', 'command', 530, 24, 15],
-    ['M102,100 V150', 'SC', 'sc', 122, 125, 4],
-    ['M164,173 H250', 'Start', 'command', 207, 173, 3],
-    ['M374,173 H460', 'SC', 'sc', 417, 158, 6],
-    ['M584,173 H670', 'Stop', 'command', 627, 173, 7],
-    ['M794,173 H880', 'SC', 'sc', 837, 158, 2],
-    ['M522,196 V266', 'Abort', 'command', 522, 231, 8],
-    ['M584,289 H670', 'SC', 'sc', 627, 272, 9],
-    ['M794,289 H880', 'Clear', 'command', 837, 289, 1],
-    ['M942,266 V196', 'SC', 'sc', 966, 231, 2],
-  ];
-  for (const [path, label, style, x, y, into] of edges) {
-    const built = edge(path, label, style, x, y);
-    root.appendChild(built.group);
-    if (!root.getAttribute(`data-into-${into}`)) {
-      root.setAttribute(`data-into-${into}`, path);
-    }
-  }
-  for (const [code, [x, y]] of Object.entries(MODULE_POSITIONS)) {
-    root.appendChild(stateBox(
-      { name: nameOf(states, code, code), kind: kindOf(kinds, code, 'waits') },
-      x, y, MODULE_BOX.w, MODULE_BOX.h,
-      Number(code) === Number(current), code,
-    ));
-  }
   root.appendChild(svgText(
-    'Stop: from Resetting, Idle, Execute (drawn from Execute).  '
-    + 'Abort: from Stopped, Resetting, Idle, Execute, Stopping (drawn from Execute).',
-    { x: 12, y: 316, class: 'frame-note' },
+    'Stop is accepted in the inner frame, Abort in the outer one. '
+    + 'Starting and Clearing pass at once; unlabelled lines are state complete.',
+    { x: 16, y: 362, class: 'frame-note' },
   ));
-  root.appendChild(svgText(
-    'Aborting also follows a failed Resetting or Stopping procedure, and Stopping '
-    + 'when the skills have not ended within the stop timeout.',
-    { x: 12, y: 334, class: 'frame-note' },
-  ));
+  setActive(root, current);
   return root;
 }
 
-
 /*
- * The skill machine of the controller (SKILL_Control): Start from Idle,
- * Succeeded or Failed; Stop passes Stopping and ends in Failed (ErrorID 7).
- * Abort leaves any state but Aborted, drawn as one transition out of the
- * frame around those states; Reset (or the module in Clearing or Stopped)
- * brings an aborted skill back to Idle. Nothing else returns to Idle.
+ * The skill machine of the controller (SKILL_Control). Start is accepted in
+ * Idle, Succeeded and Failed (the inner frame); Stop passes Stopping and ends
+ * in Failed with ErrorID 7; Abort leaves every state in the outer frame; Reset
+ * (or the module in Clearing or Stopped) brings an aborted skill back to Idle.
+ * Nothing else returns to Idle.
  */
-const MINI_BOX = { w: 78, h: 26 };
-const MINI_POSITIONS = {
-  0: [12, 58],    // Idle
-  1: [124, 58],   // Running
-  2: [124, 110],  // Stopping
-  3: [236, 12],   // Succeeded
-  4: [236, 110],  // Failed
-  5: [124, 170],  // Aborted
+const SKILL = {
+  box: { w: 84, h: 28 },
+  positions: {
+    0: [40, 20],     // Idle
+    3: [40, 84],     // Succeeded
+    4: [40, 148],    // Failed
+    1: [214, 84],    // Running
+    2: [214, 148],   // Stopping
+    5: [120, 234],   // Aborted
+  },
+  frames: [
+    { name: 'abort', x: 22, y: 4, w: 294, h: 196, members: [0, 1, 2, 3, 4] },
+    { name: 'start', x: 30, y: 12, w: 104, h: 176, members: [0, 3, 4] },
+  ],
+  edges: [
+    ['start', 1, 'M134,34 H256 V84', 'Start', 195, 34],
+    [1, 3, 'M214,94 H124', '', 0, 0],
+    [1, 4, 'M214,106 H174 V156 H124', '', 0, 0],
+    [1, 2, 'M256,112 V148', 'Stop', 256, 130],
+    [2, 4, 'M214,166 H124', '', 0, 0],
+    ['abort', 5, 'M162,200 V234', 'Abort', 162, 217],
+    [5, 0, 'M120,248 H10 V34 H40', 'Reset', 62, 248],
+  ],
 };
-// The states that Abort leaves, inside the dashed frame.
-const MINI_ABORTABLE = [0, 1, 2, 3, 4];
-const MINI_FRAME = { x: 4, y: 4, w: 318, h: 144 };
-// [from, to, path, label]; from 'frame' is the transition out of the frame.
-const MINI_EDGES = [
-  [0, 1, 'M90,71 H124', ''],
-  [3, 1, 'M246,38 Q232,52 202,62', ''],
-  [4, 1, 'M246,110 Q232,96 202,80', ''],
-  [1, 3, 'M180,58 Q200,26 236,24', ''],
-  [1, 4, 'M180,84 Q200,124 236,122', ''],
-  [1, 2, 'M163,84 V110', ''],
-  [2, 4, 'M202,123 H236', ''],
-  ['frame', 5, 'M163,148 V170', 'Abort'],
-  [5, 0, 'M124,183 H51 V84', 'Reset'],
-];
 
 function miniSkillSvg(config, current) {
   const root = svgEl('svg', {
-    viewBox: '0 0 326 202', class: 'diagram mini-skill-diagram',
+    viewBox: '0 0 320 266', class: 'diagram mini-skill-diagram',
     preserveAspectRatio: 'xMidYMid meet',
   });
   root.appendChild(defs());
-  root.appendChild(svgEl('rect', {
-    x: MINI_FRAME.x, y: MINI_FRAME.y, width: MINI_FRAME.w, height: MINI_FRAME.h,
-    rx: 10, class: 'diagram-frame superstate',
-  }));
-  const states = config.skillStates;
-  const kinds = config.skillStateKinds;
-  for (const [, into, path, label] of MINI_EDGES) {
-    const style = label ? 'command' : 'sc';
-    const [lx, ly] = label === 'Abort' ? [163, 159] : [88, 183];
-    root.appendChild(edge(path, label, style, lx, ly).group);
-    if (!root.getAttribute(`data-into-${into}`)) {
-      root.setAttribute(`data-into-${into}`, path);
-    }
-  }
-  for (const [code, [x, y]] of Object.entries(MINI_POSITIONS)) {
-    root.appendChild(stateBox(
-      { name: nameOf(states, code, code), kind: kindOf(kinds, code, 'waits') },
-      x, y, MINI_BOX.w, MINI_BOX.h, Number(code) === Number(current), code,
-    ));
-  }
+  drawMachine(root, { states: config.skillStates, kinds: config.skillStateKinds }, SKILL);
+  setActive(root, current);
   return root;
 }
 

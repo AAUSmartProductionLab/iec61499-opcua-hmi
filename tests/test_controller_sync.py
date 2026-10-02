@@ -121,7 +121,7 @@ def test_module_commands_are_accepted_where_the_controller_accepts_them(key):
 
 @pytest.mark.parametrize("key", sorted(MODULES))
 def test_skill_commands_are_accepted_where_the_controller_accepts_them(key):
-    root = fb_type(key, "Skills", "SKILL_Control")
+    root = fb_type(key, "Skills/Base", "SKILL_Control")
     here = _here_to_state(root)
     algorithms = _algorithms(root)
     every = set(model.SKILL_STATES)
@@ -142,7 +142,7 @@ def test_skill_commands_are_accepted_where_the_controller_accepts_them(key):
 @pytest.mark.parametrize("key", sorted(MODULES))
 def test_the_skill_diagram_has_the_controllers_transitions(key):
     """The HMI draws exactly the transitions of SKILL_Control between published states."""
-    root = fb_type(key, "Skills", "SKILL_Control")
+    root = fb_type(key, "Skills/Base", "SKILL_Control")
     sets = {}
     algorithms = _algorithms(root)
     ecc = root.find(".//ECC")

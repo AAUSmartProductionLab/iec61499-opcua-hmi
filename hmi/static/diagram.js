@@ -79,11 +79,14 @@ function setActive(root, code) {
     group.setAttribute('class', `state ${kind}${isActive ? ' active' : ''}`);
   }
   if (previous === null) return;
-  const route = root.getAttribute(`data-into-${code}`);
+  // The line from the previous state (or from a frame around it); no line, no dot.
+  const route = (root.hmiRoutes || []).find(
+    (item) => String(item.to) === String(code) && item.from.some((from) => String(from) === previous),
+  );
   if (!route) return;
   const dot = svgEl('circle', { r: MARKER_RADIUS, class: 'state-dot' });
   const motion = svgEl('animateMotion', {
-    dur: '0.9s', begin: 'indefinite', path: route, fill: 'remove', rotate: 'auto', calcMode: 'linear',
+    dur: '0.9s', begin: 'indefinite', path: route.path, fill: 'remove', rotate: 'auto', calcMode: 'linear',
   });
   dot.appendChild(motion);
   root.appendChild(dot);
@@ -159,9 +162,11 @@ function drawMachine(root, config, machine) {
       }));
     }
   }
-  for (const [, into, path, label, x, y] of machine.edges) {
+  for (const [from, into, path, label, x, y] of machine.edges) {
     root.appendChild(edge(path, label, label ? 'command' : 'sc', x, y, root.getAttribute('data-marker')).group);
-    if (!root.getAttribute(`data-into-${into}`)) root.setAttribute(`data-into-${into}`, path);
+    const frame = machine.frames.find((item) => item.name === from);
+    root.hmiRoutes = root.hmiRoutes || [];
+    root.hmiRoutes.push({ from: frame ? frame.members : [from], to: into, path });
   }
   for (const [code, [x, y]] of Object.entries(machine.positions)) {
     root.appendChild(stateBox(

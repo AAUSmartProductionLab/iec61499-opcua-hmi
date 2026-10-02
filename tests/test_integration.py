@@ -355,9 +355,10 @@ def test_primitive_skill_moves_equipment_and_succeeds(client):
     wait_skill(client, "stoppering", "RaisePiston", "Succeeded")
 
 
-def set_sensor(simulator, module: str, equipment: str, sensor: str, value) -> None:
+def place(simulator, module: str, equipment: str, position: float) -> None:
+    """Move an axis by hand (0 is its backward end, 1 its forward end)."""
     future = asyncio.run_coroutine_threadsafe(
-        simulator.module(module).set_equipment(equipment, sensor, value), simulator.loop
+        simulator.module(module).place(equipment, position), simulator.loop
     )
     future.result(timeout=5)
 
@@ -373,7 +374,7 @@ def test_second_skill_on_the_same_equipment_is_busy(client, simulator):
         model.ERR_BUSY,
     )
 
-    set_sensor(simulator, "stoppering", "Piston", "AtLimit", False)
+    place(simulator, "stoppering", "Piston", 0.5)
     accepted(skill_command(client, "stoppering", "LowerPiston", "Start"))
     refused(
         skill_command(client, "stoppering", "RaisePiston", "Start", {"Duration": 2}),
@@ -395,7 +396,7 @@ def test_composite_skill_drives_its_steps_not_the_standalone_skills(client, simu
     to_execute(client, "filling")
     idle_skill(client, "filling", "Dispensing")
     idle_skill(client, "filling", "MoveNeedleDown")
-    set_sensor(simulator, "filling", "NeedleAxis", "AtBottom", False)
+    place(simulator, "filling", "NeedleAxis", 0.0)
     accepted(skill_command(client, "filling", "Dispensing", "Start"))
 
     running = wait_for_any(
@@ -451,28 +452,21 @@ def test_a_moving_skill_does_not_succeed_at_once(client):
     wait_skill(client, "filling", "MoveNeedleUp", "Succeeded")
 
 
-def test_the_scale_publishes_about_once_per_second(client):
-    seen = []
-    deadline = time.monotonic() + 4.0
-    while time.monotonic() < deadline:
-        seen.append(view(client, "filling")["sensors"]["Weight"]["value"])
-        time.sleep(0.2)
-    changes = len({round(value, 3) for value in seen if value is not None})
-    assert changes <= 6, f"the weight changed {changes} times in 4 s: {seen}"
+def test_the_scale_reads_the_constant_of_its_simulated_input(client):
+    """The scale has no hardware: the module reads 2.0 g (filling.yaml, sim: values)."""
+    assert view(client, "filling")["sensors"]["Weight"]["value"] == pytest.approx(2.0)
 
 
-def test_tare_zeroes_the_scale_and_weigh_reports_it(client):
+def test_tare_and_weigh_report_the_scale_input(client):
     to_execute(client, "filling")
     idle_skill(client, "filling", "Tare")
     idle_skill(client, "filling", "Weigh")
     accepted(skill_command(client, "filling", "Tare", "Start"))
     wait_skill(client, "filling", "Tare", "Succeeded", timeout=15)
-    assert view(client, "filling")["sensors"]["Weight"]["value"] < 5.0
+    assert view(client, "filling")["sensors"]["Weight"]["value"] == pytest.approx(2.0)
     accepted(skill_command(client, "filling", "Weigh", "Start"))
     skill = wait_skill(client, "filling", "Weigh", "Succeeded", timeout=15)
-    weight = skill["results"]["Weight"]["value"]
-    assert weight is not None and weight >= 0
-    assert weight < 5.0, weight
+    assert skill["results"]["Weight"]["value"] == pytest.approx(2.0)
 
 
 def test_a_succeeded_skill_stays_succeeded_and_starts_again(client):
@@ -569,7 +563,8 @@ def test_stoppering_cycle_runs_to_success(client):
     wait_skill(client, "stoppering", "Stoppering", "Running")
     skill = wait_skill(client, "stoppering", "Stoppering", "Succeeded", timeout=90)
     assert [step["stateName"] for step in skill["steps"]] == ["Succeeded"] * 6
-    assert value_of(view(client, "stoppering"), "Equipment/Piston/AtLimit") is True
+    # the last step raises the piston off its limit switch
+    assert value_of(view(client, "stoppering"), "Equipment/Piston/AtLimit") is False
 
 
 def test_needle_moves_and_weigh_produces_a_result(client):
@@ -623,7 +618,7 @@ def test_sensor_fault_makes_the_skill_fail_with_timeout(client, simulator):
     try:
         to_execute(client, "filling")
         idle_skill(client, "filling", "MoveNeedleDown")
-        set_sensor(simulator, "filling", "NeedleAxis", "AtBottom", False)
+        place(simulator, "filling", "NeedleAxis", 0.0)
         accepted(skill_command(client, "filling", "MoveNeedleDown", "Start"))
         assert wait_for(
             lambda: view(client, "filling")["skills"]["MoveNeedleDown"]["errorId"]

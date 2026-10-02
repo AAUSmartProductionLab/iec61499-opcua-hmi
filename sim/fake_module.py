@@ -2,16 +2,18 @@
 
 Development stand-in for the Eclipse 4diac controller: same nodes, same state
 machines (MOD_StateLogic and SKILL_Control of iec61499-mgmt-py), same error
-codes, simulated equipment and realistic motion times. Variables stay read-only
-for clients, and a method answers only when it is called on the object it
-belongs to, exactly like the controller's OPC UA server (open62541).
+codes, and the equipment of cell/modules/filling.yaml and stoppering.yaml with
+the kinematics of cell/sim/module_sim.py: axes with their travel time, dead time
+and end switches, a servo without feedback, a scale that reads a constant.
+Variables stay read-only for clients, and a method answers only when it is
+called on the object it belongs to, exactly like the controller's OPC UA server
+(open62541).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
@@ -25,70 +27,84 @@ from hmi.profiles import ModuleProfile
 LOGGER = logging.getLogger(__name__)
 
 NS = prof.NAMESPACE_INDEX
-TICK = 0.05
+TICK = 0.02
 
-FAULT_SENSOR = "sensor"
-FAULT_INVARIANT = "invariant"
+FAULT_SENSOR = "sensor"        # end switches never close
+FAULT_INVARIANT = "invariant"  # end switches never open again
 
 # A step of a module level skill that finds its equipment held by another skill
 # waits this long for it before it fails with Busy (SL_* WaitFree on the controller).
 WAIT_FREE = 0.5
+# stop_timeout of the module specs: Stopping waits this long for running skills.
+STOP_TIMEOUT = 10.0
 
-# The scale has no hardware: the ESP32 publishes a new weight about once a second.
-SCALE_PERIOD = 1.0
+
+@dataclass(frozen=True)
+class AxisSpec:
+    """An axis of cell/modules/*.yaml (sim: axis): position 0..1, forward is +1."""
+
+    travel_s: float
+    dead_s: float = 0.0
+    start: float = 0.0
+    switches: dict[str, float] = field(default_factory=dict)
+
+
+AXES: dict[str, AxisSpec] = {
+    "NeedleAxis": AxisSpec(2.0, 0.15, 0.0, {"AtTop": 0.0, "AtBottom": 1.0}),
+    "Piston": AxisSpec(3.0, 0.0, 0.5, {"AtLimit": 1.0}),
+    "Plunger": AxisSpec(8.0),
+}
+# Inputs without hardware: the module reads the constant of its spec (sim: values).
+CONSTANTS: dict[str, float] = {"Scale/Weight": 2.0}
 
 
 @dataclass(frozen=True)
 class Behaviour:
-    kind: str
-    equipment: tuple[str, ...] = ()
-    sensor: tuple[str, str] | None = None
-    sensor_value: bool = False
-    other_sensor: tuple[str, str] | None = None
-    motion: float = 1.5
-    timeout: float = 8.0
-    duration_param: str = ""
-    default_duration: float = 1.0
-    speed: float = 1.0
-    result: str = ""
-    tares: bool = False
+    """What a skill primitive does (skills: in cell/modules/*.yaml)."""
 
+    equipment: str = ""
+    drive: int = 0                              # +1 forward, -1 backward on the axis
+    boost: tuple[float, float] = (0.0, 1.0)     # start boost: seconds and speed factor
+    ensures: str = ""                           # end switch that ends the run
+    timeout: float = 8.0
+    after: str | float | None = None            # duration parameter, or seconds
+    invariant: bool = False                     # NOT (AtTop AND AtBottom) while it runs
+    result: str = ""
+
+
+# moveToTop/moveToBottom start at 190 for 200 ms, then run at 140 (the nominal speed).
+NEEDLE_BOOST = (0.2, 190.0 / 140.0)
 
 BEHAVIOURS: dict[str, Behaviour] = {
-    "LowerPiston": Behaviour(
-        "sensor", ("Piston",), ("Piston", "AtLimit"), True, motion=1.5, timeout=10.0
-    ),
-    "MoveNeedleUp": Behaviour(
-        "sensor", ("NeedleAxis",), ("NeedleAxis", "AtTop"), True,
-        other_sensor=("NeedleAxis", "AtBottom"), motion=1.2, timeout=8.0,
-    ),
-    "MoveNeedleDown": Behaviour(
-        "sensor", ("NeedleAxis",), ("NeedleAxis", "AtBottom"), True,
-        other_sensor=("NeedleAxis", "AtTop"), motion=1.2, timeout=8.0,
-    ),
-    "AttachNeedle": Behaviour(
-        "sensor", ("NeedleAxis",), ("NeedleAxis", "AtBottom"), True,
-        other_sensor=("NeedleAxis", "AtTop"), motion=1.6, timeout=8.0,
-    ),
-    "Tare": Behaviour(
-        "duration", ("Scale",), duration_param="Duration", default_duration=2.0, tares=True
-    ),
-    "Weigh": Behaviour(
-        "duration", ("Scale",), duration_param="Duration", default_duration=0.2,
-        result="Weight", speed=1.0,
-    ),
-    "RaisePiston": Behaviour("duration", ("Piston",), duration_param="Duration", default_duration=2.0),
-    "ExtendPlunger": Behaviour(
-        "duration", ("Plunger",), duration_param="Duration", default_duration=10.0, speed=1.5
-    ),
-    "RetractPlunger": Behaviour(
-        "duration", ("Plunger",), duration_param="Duration", default_duration=6.5, speed=1.5
-    ),
-    "MoveArm": Behaviour(
-        "duration", ("StopperArm",), duration_param="Settle", default_duration=2.0, speed=1.0
-    ),
-    "Dwell": Behaviour("duration", (), duration_param="Duration", default_duration=1.0),
+    "MoveNeedleUp": Behaviour("NeedleAxis", -1, NEEDLE_BOOST, "AtTop", invariant=True),
+    "MoveNeedleDown": Behaviour("NeedleAxis", 1, NEEDLE_BOOST, "AtBottom", invariant=True),
+    "AttachNeedle": Behaviour("NeedleAxis", 1, ensures="AtBottom"),
+    "Dwell": Behaviour(after="Duration"),
+    "Tare": Behaviour("Scale", after=2.0),
+    "Weigh": Behaviour("Scale", after=0.2, result="Weight"),
+    "LowerPiston": Behaviour("Piston", 1, ensures="AtLimit", timeout=10.0),
+    "RaisePiston": Behaviour("Piston", -1, after="Duration"),
+    "ExtendPlunger": Behaviour("Plunger", 1, after="Duration"),
+    "RetractPlunger": Behaviour("Plunger", -1, after="Duration"),
+    "MoveArm": Behaviour("StopperArm", after="Settle"),
 }
+
+
+@dataclass
+class Axis:
+    spec: AxisSpec
+    position: float
+
+
+@dataclass
+class Run:
+    """One run of a skill primitive: a standalone skill, a step or a procedure step."""
+
+    skill: str
+    params: dict[str, float]
+    started: float
+    ends_at: float = 0.0
+    timeout_at: float = 0.0
 
 
 @dataclass
@@ -98,14 +114,11 @@ class SkillRuntime:
     error_id: int = 0
     params: dict[str, float] = field(default_factory=dict)
     results: dict[str, float] = field(default_factory=dict)
-    equipment: tuple[str, ...] = ()
-    phase: str = ""
+    phase: str = ""          # module level skill: Execute, Stopping; Halted after a Stop
     step_index: int = 0
-    started_at: float = 0.0
-    deadline: float = 0.0
-    timeout_at: float = 0.0
+    run: Run | None = None
+    done: bool = False       # the run ended at once (already at its end switch)
     fail_at: float = 0.0
-    stop_requested: bool = False
 
 
 @dataclass
@@ -113,7 +126,8 @@ class ProcedureRuntime:
     name: str
     active: bool = False
     step_index: int = 0
-    deadline: float = 0.0
+    run: Run | None = None
+    done: bool = False
 
 
 @dataclass
@@ -121,7 +135,6 @@ class StepRuntime:
     name: str
     state: int = model.SK_IDLE
     error_id: int = 0
-    deadline: float = 0.0
 
 
 class SimulatedModule:
@@ -133,25 +146,27 @@ class SimulatedModule:
         self.holder: str | None = None
         self.faults: set[str] = set()
         self.speed = 1.0
+        self.clock = 0.0
         self.skills = {skill.name: SkillRuntime(skill.name) for skill in profile.skills}
         self.procedures = {proc.name: ProcedureRuntime(proc.name) for proc in profile.procedures}
         self.steps: dict[str, StepRuntime] = {}
         self.nodes: dict[str, Any] = {}
         self.types: dict[str, ua.VariantType] = {}
-        self.equipment: dict[str, Any] = {}
         self.pending_module_state: tuple[float, int] | None = None
         self.stopping_timeout = 0.0
         self.stopping_started = False
-        self.weight = 0.0
-        self.tared = False
-        self.next_weight_change = 0.0
-        for sensor in profile.sensors:
-            self.equipment[f"{sensor.equipment}/{sensor.name}"] = _initial_sensor(sensor)
+        sensors = {f"{sensor.equipment}/{sensor.name}" for sensor in profile.sensors}
+        self.axes = {
+            name: Axis(spec, spec.start)
+            for name, spec in AXES.items()
+            if name in {s.equipment for s in profile.sensors} or name in _used_equipment(profile)
+        }
+        self.inputs: dict[str, Any] = {key: CONSTANTS.get(key, False) for key in sensors}
+        self.published: dict[str, Any] = {}
+        self.angles: dict[str, float] = {}
+        self._update_switches(apply_faults=False)
         for skill in profile.skills:
-            runtime = self.skills[skill.name]
-            runtime.params = {param.name: param.default for param in skill.params}
-            runtime.results = {result.name: 0.0 for result in skill.results}
-            runtime.equipment = _equipment_of(skill)
+            self.skills[skill.name].params = {param.name: param.default for param in skill.params}
             for group, steps in (("Execute", skill.steps), ("Stopping", skill.stop_steps)):
                 for step in steps:
                     self.steps[f"Skills/{skill.name}/{group}/{step.name}"] = StepRuntime(step.name)
@@ -189,7 +204,7 @@ class SimulatedModule:
                     continue
                 variant_type = ua.VariantType.Boolean if sensor.kind == "bool" else ua.VariantType.Double
                 await self._variable(folder, f"{profile.root}/Equipment/{name}", sensor.name,
-                                     self.equipment[f"{name}/{sensor.name}"], variant_type)
+                                     self.inputs[f"{name}/{sensor.name}"], variant_type)
 
         skills = await self._object(root, profile.root, "Skills")
         for skill in profile.skills:
@@ -289,6 +304,7 @@ class SimulatedModule:
             ],
         )
 
+
     # --- writes -----------------------------------------------------------
 
     async def write(self, key: str, value: Any) -> None:
@@ -332,13 +348,86 @@ class SimulatedModule:
         await self.write(f"{key}/State", state)
         await self.write(f"{key}/ErrorID", error_id)
 
-    async def set_equipment(self, equipment: str, sensor: str, value: Any) -> None:
-        self.equipment[f"{equipment}/{sensor}"] = value
-        await self.write(f"Equipment/{equipment}/{sensor}", value)
+    # --- equipment --------------------------------------------------------
 
-    async def set_skill_result(self, skill: str, name: str, value: float) -> None:
-        self.skills[skill].results[name] = value
-        await self.write(f"Skills/{skill}/Results/{name}", value)
+    async def place(self, equipment: str, position: float) -> None:
+        """Put an axis somewhere (a hand on the machine); its switches follow."""
+        self.axes[equipment].position = min(1.0, max(0.0, position))
+        self._update_switches(apply_faults=False)
+        await self.publish_inputs()
+
+    async def publish_inputs(self) -> None:
+        for key, value in self.inputs.items():
+            if self.published.get(key, KeyError) != value:
+                self.published[key] = value
+                await self.write(f"Equipment/{key}", value)
+
+    def _runs(self) -> list[Run]:
+        runs = [runtime.run for runtime in self.skills.values() if runtime.run]
+        runs += [procedure.run for procedure in self.procedures.values() if procedure.active and procedure.run]
+        return runs
+
+    def _move_axes(self, dt: float) -> None:
+        """Drive every axis by the runs that command it (module_sim.py Axis)."""
+        now = self.clock
+        for name, axis in self.axes.items():
+            rate = 0.0
+            for run in self._runs():
+                behaviour = BEHAVIOURS[run.skill]
+                if behaviour.equipment != name or not behaviour.drive:
+                    continue
+                elapsed = now - run.started
+                if elapsed < axis.spec.dead_s:
+                    continue
+                boost_s, boost = behaviour.boost
+                rate += behaviour.drive * (boost if elapsed < boost_s else 1.0)
+            axis.position = min(1.0, max(0.0, axis.position + rate * dt / axis.spec.travel_s))
+        self._update_switches(apply_faults=True)
+
+    def _update_switches(self, apply_faults: bool) -> None:
+        for name, axis in self.axes.items():
+            for switch, at in axis.spec.switches.items():
+                key = f"{name}/{switch}"
+                if key not in self.inputs:
+                    continue
+                closed = axis.position >= at if at >= 0.5 else axis.position <= at
+                old = bool(self.inputs[key])
+                if apply_faults and FAULT_SENSOR in self.faults and closed and not old:
+                    closed = False
+                if apply_faults and FAULT_INVARIANT in self.faults and old and not closed:
+                    closed = True
+                self.inputs[key] = closed
+
+    def _begin(self, skill: str, params: dict[str, float]) -> Run | None:
+        """Start a run of a skill primitive; None when it is already at its end switch."""
+        behaviour = BEHAVIOURS[skill]
+        if behaviour.ensures and self.inputs.get(f"{behaviour.equipment}/{behaviour.ensures}"):
+            return None
+        now = self.clock
+        run = Run(skill, dict(params), now, timeout_at=now + behaviour.timeout)
+        if behaviour.after is not None:
+            duration = params.get(behaviour.after, 0.0) if isinstance(behaviour.after, str) else behaviour.after
+            run.ends_at = now + float(duration)
+        if "Angle" in params and behaviour.equipment:
+            self.angles[behaviour.equipment] = params["Angle"]
+        return run
+
+    def _outcome(self, run: Run) -> int | None:
+        """None while the run goes on, 0 when it is done, else the ErrorID it fails with."""
+        behaviour = BEHAVIOURS[run.skill]
+        if behaviour.invariant and self.inputs.get("NeedleAxis/AtTop") and self.inputs.get("NeedleAxis/AtBottom"):
+            return model.ERR_INVARIANT
+        if behaviour.ensures:
+            if self.inputs.get(f"{behaviour.equipment}/{behaviour.ensures}"):
+                return 0
+            return model.ERR_TIMEOUT if self.clock >= run.timeout_at else None
+        return 0 if self.clock >= run.ends_at else None
+
+    def _result(self, skill: str) -> dict[str, float]:
+        behaviour = BEHAVIOURS[skill]
+        if not behaviour.result:
+            return {}
+        return {behaviour.result: float(self.inputs.get(f"{behaviour.equipment}/{behaviour.result}", 0.0))}
 
     # --- occupation -------------------------------------------------------
 
@@ -360,6 +449,7 @@ class SimulatedModule:
         await self.write("Occupation/Occupied", False)
         return _answer(True, 0)
 
+
     # --- module commands --------------------------------------------------
 
     async def on_module_command(self, command: str, session: str) -> list[ua.Variant]:
@@ -367,7 +457,7 @@ class SimulatedModule:
             return _answer(False, model.ERR_NOT_PERMITTED)
         if self.module_state not in model.MODULE_COMMAND_FROM_STATES[command]:
             return _answer(False, model.ERR_NOT_READY)
-        now = time.monotonic()
+        now = self.clock
         if command == "Reset":
             await self.set_module_state(model.RESETTING)
             await self._start_procedure("Resetting")
@@ -376,21 +466,15 @@ class SimulatedModule:
             await self.set_module_state(model.STARTING)
         elif command == "Stop":
             await self.set_module_state(model.STOPPING)
-            # module Stop halts every running skill instance, the steps of a
-            # Resetting procedure that is still going included
+            # A skill started over OPC UA halts itself; the steps of a module level
+            # skill or of a running Resetting procedure are left to their parent.
             for runtime in self.skills.values():
                 if runtime.state == model.SK_RUNNING:
                     await self._halt(runtime)
-            resetting = self.procedures.get("Resetting")
-            if resetting is not None and resetting.active:
-                resetting.active = False
-                for key, step in self.steps.items():
-                    if key.startswith("Procedures/Resetting/") and step.state == model.SK_RUNNING:
-                        await self.set_step_state(key, model.SK_FAILED, model.ERR_INTERRUPTED)
-            if not self._any_skill_active():
-                await self._begin_stopping_procedure(now)
+            if self._any_active():
+                self.stopping_timeout = now + STOP_TIMEOUT
             else:
-                self.stopping_timeout = now + 10.0
+                await self._begin_stopping_procedure(now)
         elif command == "Abort":
             await self._abort_everything(now)
         elif command == "Clear":
@@ -398,27 +482,29 @@ class SimulatedModule:
             await self.set_module_state(model.CLEARING)
         return _answer(True, 0)
 
-    def _any_skill_active(self) -> bool:
-        return any(
-            runtime.state in (model.SK_RUNNING, model.SK_STOPPING)
-            for runtime in self.skills.values()
-        )
+    def _any_active(self) -> bool:
+        """Whether Stopping still waits: a skill runs, or the Resetting procedure does."""
+        skills = any(r.state in (model.SK_RUNNING, model.SK_STOPPING) for r in self.skills.values())
+        resetting = self.procedures.get("Resetting")
+        return skills or bool(resetting and resetting.active)
 
     async def _begin_stopping_procedure(self, now: float) -> None:
         if self.stopping_started:
             return
         self.stopping_started = True
-        if self._procedure("Stopping") is not None:
+        self.stopping_timeout = 0.0
+        if "Stopping" in self.procedures:
             await self._start_procedure("Stopping")
         else:
             self.pending_module_state = (now + 0.05, model.STOPPED)
 
     async def _abort_everything(self, now: float) -> None:
         self.pending_module_state = (now + 0.05, model.ABORTED)
+        self.stopping_timeout = 0.0
         await self.set_module_state(model.ABORTING)
         for procedure in self.procedures.values():
-            procedure.active = False
-        for name, runtime in self.skills.items():
+            procedure.active, procedure.run = False, None
+        for runtime in self.skills.values():
             if runtime.state != model.SK_ABORTED:
                 await self._abort_skill(runtime)
         # The steps of sequences and procedures are skill instances as well.
@@ -431,8 +517,7 @@ class SimulatedModule:
 
     async def _abort_skill(self, runtime: SkillRuntime) -> None:
         active = runtime.state in (model.SK_RUNNING, model.SK_STOPPING)
-        runtime.stop_requested = True
-        runtime.fail_at = 0.0
+        runtime.run, runtime.done, runtime.fail_at, runtime.phase = None, False, 0.0, ""
         await self.set_skill_state(
             runtime.name, model.SK_ABORTED, model.ERR_INTERRUPTED if active else None
         )
@@ -445,21 +530,14 @@ class SimulatedModule:
 
     async def _start_procedure(self, name: str) -> None:
         runtime = self.procedures[name]
-        runtime.active = True
-        runtime.step_index = 0
+        runtime.active, runtime.step_index = True, 0
         await self._run_procedure_step(runtime)
 
     async def _run_procedure_step(self, runtime: ProcedureRuntime) -> None:
-        procedure = self._procedure(runtime.name)
-        if procedure is None or runtime.step_index >= len(procedure.steps):
-            runtime.active = False
-            return
-        step = procedure.steps[runtime.step_index]
-        key = f"Procedures/{runtime.name}/{step.name}"
-        params = {param.name: param.default for param in step.params}
-        runtime.deadline = time.monotonic() + _duration(BEHAVIOURS.get(step.runs), params, self.speed)
-        self.steps[key].deadline = runtime.deadline
-        await self.set_step_state(key, model.SK_RUNNING)
+        step = self._procedure(runtime.name).steps[runtime.step_index]
+        runtime.run = self._begin(step.runs, {param.name: param.default for param in step.params})
+        runtime.done = runtime.run is None
+        await self.set_step_state(f"Procedures/{runtime.name}/{step.name}", model.SK_RUNNING)
 
     # --- skill commands ---------------------------------------------------
 
@@ -477,16 +555,13 @@ class SimulatedModule:
                 return _answer(False, model.ERR_BUSY)
             if runtime.state == model.SK_ABORTED:
                 return _answer(False, model.ERR_NOT_READY)
-            values: dict[str, float] = {}
-            for param, value in zip(skill.params, params, strict=False):
-                values[param.name] = float(value)
+            values = {param.name: float(value) for param, value in zip(skill.params, params, strict=False)}
             for param in skill.params:
-                value = values.get(param.name, param.default)
-                if not param.minimum <= value <= param.maximum:
+                if not param.minimum <= values.get(param.name, param.default) <= param.maximum:
                     return _answer(False, model.ERR_OUT_OF_RANGE)
             # A primitive checks its equipment at Start; a module level skill
             # does not (its steps find out, and fail with Busy after a wait).
-            if not skill.module_level and self._equipment_busy(runtime.equipment, name):
+            if not skill.module_level and self._equipment_busy(skill.uses, name):
                 return _answer(False, model.ERR_BUSY)
             await self._start_skill(runtime, values)
             return _answer(True, 0)
@@ -515,11 +590,37 @@ class SimulatedModule:
 
     def _equipment_busy(self, equipment: Iterable[str], name: str) -> bool:
         wanted = set(equipment)
-        return any(
-            wanted & self._held(other)
-            for other_name, other in self.skills.items()
-            if other_name != name
-        )
+        return any(wanted & self._held(other) for other_name, other in self.skills.items() if other_name != name)
+
+    async def _start_skill(self, runtime: SkillRuntime, values: dict[str, float]) -> None:
+        skill = self._skill(runtime.name)
+        runtime.params.update(values)
+        runtime.fail_at = 0.0
+        runtime.phase = "Execute"
+        runtime.step_index = 0
+        if values:
+            for name, value in values.items():
+                await self.write(f"Skills/{runtime.name}/Parameters/{name}", value)
+        await self.set_skill_state(runtime.name, model.SK_RUNNING)
+        if skill.module_level:
+            await self._run_skill_step(runtime)
+        else:
+            runtime.run = self._begin(runtime.name, runtime.params)
+            if runtime.run is None:
+                # already at its end switch: done in the same event (AlreadyDone)
+                await self._finish(runtime, 0, self._result(runtime.name))
+
+    async def _run_skill_step(self, runtime: SkillRuntime) -> None:
+        skill = self._skill(runtime.name)
+        steps = skill.stop_steps if runtime.phase == "Stopping" else skill.steps
+        step = steps[runtime.step_index]
+        params = {param.name: param.default for param in step.params}
+        runtime.run = self._begin(step.runs, params)
+        runtime.done = runtime.run is None
+        if runtime.phase == "Execute" and self._equipment_busy(step.uses, runtime.name):
+            runtime.run, runtime.done = None, False
+            runtime.fail_at = self.clock + WAIT_FREE
+        await self.set_step_state(f"Skills/{runtime.name}/{runtime.phase}/{step.name}", model.SK_RUNNING)
 
     async def _halt(self, runtime: SkillRuntime) -> None:
         """Stop or module Stop: Running -> Stopping, then Failed with Interrupted (7).
@@ -528,240 +629,119 @@ class SimulatedModule:
         its stop sequence, if it has one, while it shows Stopping.
         """
         skill = self._skill(runtime.name)
-        runtime.stop_requested = True
-        runtime.fail_at = 0.0
+        runtime.run, runtime.done, runtime.fail_at = None, False, 0.0
         if skill.module_level and runtime.phase == "Execute" and runtime.step_index < len(skill.steps):
             key = f"Skills/{runtime.name}/Execute/{skill.steps[runtime.step_index].name}"
             await self.set_step_state(key, model.SK_FAILED, model.ERR_INTERRUPTED)
         await self.set_skill_state(runtime.name, model.SK_STOPPING)
         if skill.stop_steps:
-            runtime.phase = "Stopping"
-            runtime.step_index = 0
+            runtime.phase, runtime.step_index = "Stopping", 0
             await self._run_skill_step(runtime)
         else:
             runtime.phase = "Halted"
 
-    async def _start_skill(self, runtime: SkillRuntime, values: dict[str, float]) -> None:
-        skill = self._skill(runtime.name)
-        runtime.params.update(values)
-        runtime.stop_requested = False
-        runtime.fail_at = 0.0
-        runtime.phase = "Execute"
-        runtime.step_index = 0
-        now = time.monotonic()
-        if skill.module_level:
-            await self.set_skill_state(runtime.name, model.SK_RUNNING)
-            await self._run_skill_step(runtime)
+    async def _finish(self, runtime: SkillRuntime, error_id: int, results: dict[str, float]) -> None:
+        """End a skill: Succeeded with its results, or Failed with error_id."""
+        runtime.run, runtime.done, runtime.fail_at, runtime.phase = None, False, 0.0, ""
+        if error_id:
+            await self.set_skill_state(runtime.name, model.SK_FAILED, error_id)
             return
-        behaviour = BEHAVIOURS.get(runtime.name)
-        if behaviour is None:
-            runtime.deadline = now + 1.0
-            runtime.timeout_at = now + 8.0 / max(self.speed, 0.01)
-            await self.set_skill_state(runtime.name, model.SK_RUNNING)
-            return
-        if behaviour.kind == "sensor" and self._sensor_reached(behaviour):
-            await self.set_skill_state(runtime.name, model.SK_SUCCEEDED)
-            return
-        runtime.started_at = now
-        runtime.deadline = now + behaviour.motion / max(behaviour.speed * self.speed, 0.1)
-        # slow motion needs a longer timeout, not a shorter one
-        runtime.timeout_at = now + behaviour.timeout / max(self.speed, 0.01)
-        await self.set_skill_state(runtime.name, model.SK_RUNNING)
-
-    async def _run_skill_step(self, runtime: SkillRuntime) -> None:
-        skill = self._skill(runtime.name)
-        steps = skill.stop_steps if runtime.phase == "Stopping" else skill.steps
-        if runtime.step_index >= len(steps):
-            return
-        step = steps[runtime.step_index]
-        key = f"Skills/{runtime.name}/{runtime.phase}/{step.name}"
-        params = {param.name: runtime.params.get(param.name, param.default) for param in step.params}
-        behaviour = BEHAVIOURS.get(step.runs)
-        now = time.monotonic()
-        runtime.deadline = now + _duration(behaviour, params, self.speed)
-        runtime.timeout_at = runtime.deadline + (behaviour.timeout if behaviour else 8.0) / max(self.speed, 0.01)
-        if runtime.phase == "Execute" and self._equipment_busy(step.uses, runtime.name):
-            runtime.fail_at = now + WAIT_FREE
-        self.steps[key].deadline = runtime.deadline
-        await self.set_step_state(key, model.SK_RUNNING)
-
-    def _sensor_reached(self, behaviour: Behaviour) -> bool:
-        if behaviour.sensor is None:
-            return True
-        equipment, sensor = behaviour.sensor
-        return bool(self.equipment.get(f"{equipment}/{sensor}")) == behaviour.sensor_value
-
-    async def _skill_succeeded(self, runtime: SkillRuntime) -> None:
-        skill = self._skill(runtime.name)
-        for result in skill.results:
-            await self.set_skill_result(runtime.name, result.name, self.weight)
-            step_name = _result_step(skill, result.name)
-            if step_name:
-                key = f"Skills/{runtime.name}/Execute/{step_name}/Results/{result.name}"
-                await self.write(key, self.weight)
+        for name, value in results.items():
+            await self.write(f"Skills/{runtime.name}/Results/{name}", value)
         await self.set_skill_state(runtime.name, model.SK_SUCCEEDED)
-
-    async def _finish_step(self, runtime: SkillRuntime, behaviour: Behaviour | None) -> None:
-        if behaviour is None:
-            return
-        if behaviour.sensor is not None and FAULT_SENSOR not in self.faults:
-            equipment, sensor = behaviour.sensor
-            await self.set_equipment(equipment, sensor, behaviour.sensor_value)
-        if behaviour.other_sensor is not None:
-            # one axis has one position: the opposite end switch must go off
-            equipment, sensor = behaviour.other_sensor
-            await self.set_equipment(equipment, sensor, False)
-        if behaviour.tares:
-            self.tared = True
-            self.weight = 0.0
-            await self.set_equipment("Scale", "Weight", self.weight)
-        if behaviour.result:
-            step_name = _result_step(self._skill(runtime.name), behaviour.result)
-            if step_name:
-                key = f"Skills/{runtime.name}/{runtime.phase}/{step_name}/Results/{behaviour.result}"
-                await self.write(key, self.weight)
 
     # --- simulation loop --------------------------------------------------
 
-    def tick(self) -> list[Awaitable[None]]:
-        now = time.monotonic()
-        work: list[Awaitable[None]] = [self._tick_scale(now)]
-        if self.pending_module_state is not None:
-            due, target = self.pending_module_state
-            if now >= due:
-                self.pending_module_state = None
-                work.append(self.set_module_state(target))
-        for name, runtime in self.skills.items():
-            work.extend(self._tick_skill(name, runtime, now))
+    def tick(self, dt: float) -> list[Awaitable[None]]:
+        self.clock += dt * self.speed
+        work: list[Awaitable[None]] = []
+        if self.pending_module_state is not None and self.clock >= self.pending_module_state[0]:
+            target = self.pending_module_state[1]
+            self.pending_module_state = None
+            work.append(self.set_module_state(target))
+        self._move_axes(dt * self.speed)
+        work.append(self.publish_inputs())
+        for runtime in self.skills.values():
+            if runtime.state in (model.SK_RUNNING, model.SK_STOPPING):
+                work.append(self._tick_skill(runtime))
         for procedure in self.procedures.values():
-            work.extend(self._tick_procedure(procedure, now))
+            if procedure.active:
+                work.append(self._tick_procedure(procedure))
+        work.append(self._tick_module())
         return work
 
-    async def _tick_scale(self, now: float) -> None:
-        """The ESP32 publishes a fresh weight about once per second."""
-        if "Scale/Weight" not in self.equipment:
-            return
-        if now < self.next_weight_change:
-            return
-        self.next_weight_change = now + SCALE_PERIOD
-        if self.tared:
-            self.weight = round(random.uniform(0.0, 1.5), 1)
-        else:
-            self.weight = round(random.uniform(0.0, 250.0), 1)
-        await self.set_equipment("Scale", "Weight", self.weight)
-
-    def _tick_skill(self, name: str, runtime: SkillRuntime, now: float) -> list[Awaitable[None]]:
-        if runtime.state not in (model.SK_RUNNING, model.SK_STOPPING):
-            return []
-        skill = self._skill(name)
-        work: list[Awaitable[None]] = []
+    async def _tick_skill(self, runtime: SkillRuntime) -> None:
+        skill = self._skill(runtime.name)
         if runtime.phase == "Halted":
             # the brake command went out: the halted skill reports Interrupted
-            runtime.phase = ""
-            work.append(self.set_skill_state(name, model.SK_FAILED, model.ERR_INTERRUPTED))
-            return work
-        if runtime.state == model.SK_RUNNING and self._invariant_broken(name):
-            runtime.stop_requested = True
-            work.append(self._fail_skill(runtime, model.ERR_INVARIANT))
-            return work
-        if runtime.fail_at and now >= runtime.fail_at:
-            runtime.fail_at = 0.0
-            work.append(self._fail_skill(runtime, model.ERR_BUSY))
-            return work
-        if skill.module_level:
-            work.extend(self._tick_sequence(runtime, now))
-            return work
-        behaviour = BEHAVIOURS.get(name)
-        if now < runtime.deadline:
-            return []
-        if behaviour is not None and behaviour.kind == "sensor" and (
-            FAULT_SENSOR in self.faults or now >= runtime.timeout_at
-        ):
-            work.append(self._fail_skill(runtime, model.ERR_TIMEOUT))
-            return work
-        work.append(self._finish_step(runtime, behaviour))
-        work.append(self._skill_succeeded(runtime))
-        return work
-
-    def _tick_sequence(self, runtime: SkillRuntime, now: float) -> list[Awaitable[None]]:
-        skill = self._skill(runtime.name)
-        steps = skill.stop_steps if runtime.phase == "Stopping" else skill.steps
-        work: list[Awaitable[None]] = []
-        if now < runtime.deadline:
-            return work
+            await self._finish(runtime, model.ERR_INTERRUPTED, {})
+            return
         if runtime.fail_at:
-            return work
+            if self.clock >= runtime.fail_at:
+                key = f"Skills/{runtime.name}/Execute/{skill.steps[runtime.step_index].name}"
+                await self.set_step_state(key, model.SK_FAILED, model.ERR_BUSY)
+                await self._finish(runtime, model.ERR_BUSY, {})
+            return
+        outcome = 0 if runtime.done else (self._outcome(runtime.run) if runtime.run else None)
+        if outcome is None:
+            return
+        if not skill.module_level:
+            await self._finish(runtime, outcome, self._result(runtime.name) if not outcome else {})
+            return
+        steps = skill.stop_steps if runtime.phase == "Stopping" else skill.steps
         step = steps[runtime.step_index]
         key = f"Skills/{runtime.name}/{runtime.phase}/{step.name}"
-        behaviour = BEHAVIOURS.get(step.runs)
-        if behaviour is not None and behaviour.kind == "sensor" and FAULT_SENSOR in self.faults:
-            work.append(self._fail_skill(runtime, model.ERR_TIMEOUT))
-            return work
-        work.append(self._finish_step(runtime, behaviour))
-        work.append(self.set_step_state(key, model.SK_SUCCEEDED))
+        result = self._result(step.runs) if not outcome else {}
+        if outcome:
+            await self.set_step_state(key, model.SK_FAILED, outcome)
+            # a failed stop sequence still ends the skill as stopped
+            await self._finish(runtime, model.ERR_INTERRUPTED if runtime.phase == "Stopping" else outcome, {})
+            return
+        for name, value in result.items():
+            await self.write(f"{key}/Results/{name}", value)
+            runtime.results[name] = value
+        await self.set_step_state(key, model.SK_SUCCEEDED)
         runtime.step_index += 1
-        if runtime.step_index >= len(steps):
-            if runtime.phase == "Stopping":
-                work.append(self._fail_skill(runtime, model.ERR_INTERRUPTED))
-            else:
-                work.append(self._skill_succeeded(runtime))
-            return work
-        work.append(self._run_skill_step(runtime))
-        return work
-
-    async def _fail_skill(self, runtime: SkillRuntime, error_id: int) -> None:
-        skill = self._skill(runtime.name)
-        if skill.module_level:
-            steps = skill.stop_steps if runtime.phase == "Stopping" else skill.steps
-            if runtime.step_index < len(steps):
-                key = f"Skills/{runtime.name}/{runtime.phase}/{steps[runtime.step_index].name}"
-                if key in self.steps:
-                    await self.set_step_state(key, model.SK_FAILED, error_id)
-        runtime.phase = ""
-        await self.set_skill_state(runtime.name, model.SK_FAILED, error_id)
-
-    def _invariant_broken(self, name: str) -> bool:
-        if name not in ("MoveNeedleUp", "MoveNeedleDown"):
-            return False
-        if FAULT_INVARIANT not in self.faults:
-            return False
-        return bool(self.equipment.get("NeedleAxis/AtTop")) and bool(
-            self.equipment.get("NeedleAxis/AtBottom")
-        )
-
-    def _tick_procedure(self, runtime: ProcedureRuntime, now: float) -> list[Awaitable[None]]:
-        if not runtime.active:
-            return []
-        procedure = self._procedure(runtime.name)
-        if procedure is None or now < runtime.deadline:
-            return []
-        work: list[Awaitable[None]] = []
-        key = f"Procedures/{runtime.name}/{procedure.steps[runtime.step_index].name}"
-        work.append(self.set_step_state(key, model.SK_SUCCEEDED))
-        runtime.step_index += 1
-        if runtime.step_index >= len(procedure.steps):
-            runtime.active = False
-            if runtime.name == "Resetting" and self.module_state == model.RESETTING:
-                work.append(self.set_module_state(model.IDLE))
-            elif runtime.name == "Stopping" and self.module_state == model.STOPPING:
-                self.pending_module_state = (now + 0.05, model.STOPPED)
+        if runtime.step_index < len(steps):
+            await self._run_skill_step(runtime)
+        elif runtime.phase == "Stopping":
+            await self._finish(runtime, model.ERR_INTERRUPTED, {})
         else:
-            work.append(self._run_procedure_step(runtime))
-        return work
+            results = {r.name: runtime.results.get(r.name, 0.0) for r in skill.results}
+            await self._finish(runtime, 0, results)
 
-    def tick_module(self, now: float) -> list[Awaitable[None]]:
-        work: list[Awaitable[None]] = []
-        if self.module_state == model.STOPPING and not self._any_skill_active():
-            self.stopping_timeout = 0.0
-            work.append(self._begin_stopping_procedure(now))
-        if (
-            self.module_state == model.STOPPING
-            and self.stopping_timeout
-            and now > self.stopping_timeout
-        ):
-            self.stopping_timeout = 0.0
-            work.append(self._abort_everything(now))
-        return work
+    async def _tick_procedure(self, runtime: ProcedureRuntime) -> None:
+        outcome = 0 if runtime.done else (self._outcome(runtime.run) if runtime.run else None)
+        if outcome is None:
+            return
+        procedure = self._procedure(runtime.name)
+        key = f"Procedures/{runtime.name}/{procedure.steps[runtime.step_index].name}"
+        runtime.run, runtime.done = None, False
+        if outcome:
+            # RESETTING_FAILED / STOPPING_FAILED: the module aborts
+            runtime.active = False
+            await self.set_step_state(key, model.SK_FAILED, outcome)
+            if self.module_state in (model.RESETTING, model.STOPPING):
+                await self._abort_everything(self.clock)
+            return
+        await self.set_step_state(key, model.SK_SUCCEEDED)
+        runtime.step_index += 1
+        if runtime.step_index < len(procedure.steps):
+            await self._run_procedure_step(runtime)
+            return
+        runtime.active = False
+        if runtime.name == "Resetting" and self.module_state == model.RESETTING:
+            await self.set_module_state(model.IDLE)
+        elif runtime.name == "Stopping" and self.module_state == model.STOPPING:
+            self.pending_module_state = (self.clock + 0.05, model.STOPPED)
+
+    async def _tick_module(self) -> None:
+        if self.module_state != model.STOPPING or self.stopping_started:
+            return
+        if not self._any_active():
+            await self._begin_stopping_procedure(self.clock)
+        elif self.stopping_timeout and self.clock > self.stopping_timeout:
+            await self._abort_everything(self.clock)
 
 
 def _answer(accepted: bool, error_id: int) -> list[ua.Variant]:
@@ -770,43 +750,17 @@ def _answer(accepted: bool, error_id: int) -> list[ua.Variant]:
         ua.Variant(error_id, ua.VariantType.UInt16),
     ]
 
+def _used_equipment(profile: ModuleProfile) -> set[str]:
+    used = {item for skill in profile.skills for item in skill.uses}
+    for procedure in profile.procedures:
+        used.update(item for step in procedure.steps for item in step.uses)
+    return used
+
 
 def _value(argument: Any) -> Any:
     return argument.Value if isinstance(argument, ua.Variant) else argument
 
 
-def _initial_sensor(sensor: prof.Sensor) -> Any:
-    if sensor.kind == "bool":
-        return sensor.name == "AtTop"
-    return 0.0
-
-
-def _equipment_of(skill: prof.Skill) -> tuple[str, ...]:
-    if skill.uses:
-        return skill.uses
-    equipment: list[str] = []
-    for step in skill.steps:
-        for item in step.uses:
-            if item not in equipment:
-                equipment.append(item)
-    return tuple(equipment)
-
-
-def _duration(behaviour: Behaviour | None, params: dict[str, float], speed: float = 1.0) -> float:
-    if behaviour is None:
-        return 1.0
-    factor = max(behaviour.speed, 0.1) * max(speed, 0.01)
-    if behaviour.kind == "sensor":
-        return behaviour.motion / factor
-    value = params.get(behaviour.duration_param, behaviour.default_duration)
-    return float(value) / factor
-
-
-def _result_step(skill: prof.Skill, result_name: str) -> str:
-    for step in skill.steps:
-        if any(result.name == result_name for result in step.results):
-            return step.name
-    return ""
 
 
 def _module_handler(module: SimulatedModule, command: str) -> Any:
@@ -829,6 +783,8 @@ def _skill_handler(module: SimulatedModule, name: str, command: str) -> Any:
         return await module.on_skill_command(name, command, session, params)
 
     return handler
+
+
 
 
 class SimulatedServer:
@@ -855,9 +811,12 @@ class SimulatedServer:
         LOGGER.info("simulator serving %s", self.endpoint)
 
     async def _run(self) -> None:
+        last = time.monotonic()
         while not self._stop.is_set():
+            now = time.monotonic()
+            dt, last = now - last, now
             for module in self.modules.values():
-                for work in module.tick() + module.tick_module(time.monotonic()):
+                for work in module.tick(dt):
                     try:
                         await work
                     except Exception:  # noqa: BLE001, PERF203

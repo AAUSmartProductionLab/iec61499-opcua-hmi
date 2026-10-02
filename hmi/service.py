@@ -22,6 +22,7 @@ LOGGER = logging.getLogger(__name__)
 
 LOG_LIMIT = 500
 WATCH_INTERVAL = 0.1
+FAILURE_WAIT = 1.0
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ class HmiService:
         self._lock = threading.RLock()
         self._operators: dict[str, Operator] = {}
         self._last_states: dict[str, dict[str, Any]] = {}
+        self._failures: dict[tuple[str, str], tuple[float, str]] = {}
         self._reassert_lock = threading.Lock()
         self._watch_stop = threading.Event()
         self._watcher: threading.Thread | None = None
@@ -510,6 +512,19 @@ class HmiService:
                 if old == value:
                     continue
                 self._log_transition(profile, path, old, value)
+            self._log_failures(profile, values)
+
+    def _log_failures(self, profile: ModuleProfile, values: dict[str, Any]) -> None:
+        """Log failed skills with their ErrorID, which may arrive a notification later."""
+        for (module_key, skill), (deadline, old_name) in list(self._failures.items()):
+            if module_key != profile.key:
+                continue
+            error_id = _as_int(values.get(f"Skills/{skill}/ErrorID"))
+            if error_id <= 0 and time.monotonic() < deadline:
+                continue
+            del self._failures[(module_key, skill)]
+            level = "warn" if error_id == model.ERR_INTERRUPTED else "error"
+            self.log(profile.key, level, f"{skill}: {old_name} -> Failed, {model.error_text(error_id)}")
 
     def _log_transition(self, profile: ModuleProfile, path: str, old: Any, new: Any) -> None:
         parts = path.split("/")
@@ -525,12 +540,8 @@ class HmiService:
             old_name = model.skill_state_name(old)
             new_name = model.skill_state_name(new)
             if new == model.SK_FAILED:
-                error_id = _as_int(
-                    self.link_for(profile.key).channels[profile.key].value(f"Skills/{skill}/ErrorID")
-                )
-                level = "warn" if error_id == model.ERR_INTERRUPTED else "error"
-                self.log(profile.key, level, f"{skill}: {old_name} -> {new_name}, "
-                                             f"{model.error_text(error_id)}")
+                # logged once its ErrorID has arrived (_log_failures)
+                self._failures[(profile.key, skill)] = (time.monotonic() + FAILURE_WAIT, old_name)
             elif new == model.SK_ABORTED:
                 self.log(profile.key, "warn", f"{skill}: {old_name} -> {new_name}")
             elif new in (model.SK_RUNNING, model.SK_SUCCEEDED):

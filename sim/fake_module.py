@@ -350,15 +350,16 @@ class SimulatedModule:
             runtime.error_id = error_id
         elif state in (model.SK_RUNNING, model.SK_SUCCEEDED):
             runtime.error_id = 0
-        await self.write(f"Skills/{name}/State", state)
+        # ErrorID first: the controller publishes both in one write
         await self.write(f"Skills/{name}/ErrorID", runtime.error_id)
+        await self.write(f"Skills/{name}/State", state)
 
     async def set_step_state(self, key: str, state: int, error_id: int = 0) -> None:
         step = self.steps[key]
         step.state = state
         step.error_id = error_id
-        await self.write(f"{key}/State", state)
         await self.write(f"{key}/ErrorID", error_id)
+        await self.write(f"{key}/State", state)
 
     # --- equipment --------------------------------------------------------
 
@@ -396,9 +397,12 @@ class SimulatedModule:
             axis.position = min(1.0, max(0.0, axis.position + rate * dt / axis.spec.travel_s))
         self._update_switches(apply_faults=True)
         if "Scale/Weight" in self.inputs:
-            dwelling = any(run.skill == "Dwell" for run in self._runs())
-            if dwelling and self.inputs.get("NeedleAxis/AtBottom"):
-                self.gross_g += FLOW_ML_PER_S * self.density * dt
+            if self.inputs.get("NeedleAxis/AtBottom"):
+                for run in self._runs():
+                    if run.skill == "Dwell":
+                        # only the part of this tick inside the dwell
+                        flowing = min(now, run.ends_at) - max(now - dt, run.started)
+                        self.gross_g += FLOW_ML_PER_S * self.density * max(0.0, flowing)
             self._update_scale()
 
     def _update_scale(self) -> None:

@@ -237,7 +237,8 @@ FILLING = ModuleProfile(
         "MoveNeedleUp and MoveNeedleDown must hold NOT (AtTop AND AtBottom) during the run, "
         "otherwise they fail with InvariantViolated (2).",
         "Dwell is a step only, it is not callable on its own.",
-        "The scale has no hardware yet: the module reads a constant 2.0 g, and Tare does not change it.",
+        "The scale has no hardware yet: the module reads a constant 2.0 g. The simulator weighs a vial "
+        "that Tare zeroes and Dispensing fills with about 3 g (3 mL).",
     ),
 )
 

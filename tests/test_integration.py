@@ -452,21 +452,24 @@ def test_a_moving_skill_does_not_succeed_at_once(client):
     wait_skill(client, "filling", "MoveNeedleUp", "Succeeded")
 
 
-def test_the_scale_reads_the_constant_of_its_simulated_input(client):
-    """The scale has no hardware: the module reads 2.0 g (filling.yaml, sim: values)."""
-    assert view(client, "filling")["sensors"]["Weight"]["value"] == pytest.approx(2.0)
-
-
-def test_tare_and_weigh_report_the_scale_input(client):
+def test_tare_zeroes_the_scale_and_dispensing_fills_about_three_grams(client):
     to_execute(client, "filling")
-    idle_skill(client, "filling", "Tare")
-    idle_skill(client, "filling", "Weigh")
+    for skill in ("Tare", "Dispensing", "Weigh"):
+        idle_skill(client, "filling", skill)
     accepted(skill_command(client, "filling", "Tare", "Start"))
     wait_skill(client, "filling", "Tare", "Succeeded", timeout=15)
-    assert view(client, "filling")["sensors"]["Weight"]["value"] == pytest.approx(2.0)
+    assert wait_for(lambda: view(client, "filling")["sensors"]["Weight"]["value"] == 0.0, timeout=5)
+    accepted(skill_command(client, "filling", "Dispensing", "Start"))
+    wait_skill(client, "filling", "Dispensing", "Running")       # not the last run's Succeeded
+    skill = wait_skill(client, "filling", "Dispensing", "Succeeded", timeout=30)
+    assert 2.9 <= skill["results"]["Weight"]["value"] <= 3.2, skill["results"]
     accepted(skill_command(client, "filling", "Weigh", "Start"))
-    skill = wait_skill(client, "filling", "Weigh", "Succeeded", timeout=15)
-    assert skill["results"]["Weight"]["value"] == pytest.approx(2.0)
+
+    def weighed():
+        value = view(client, "filling")["skills"]["Weigh"]["results"]["Weight"]["value"]
+        return value is not None and 2.9 <= value <= 3.2
+
+    assert wait_for(weighed, timeout=15), view(client, "filling")["skills"]["Weigh"]
 
 
 def test_a_succeeded_skill_stays_succeeded_and_starts_again(client):

@@ -4,7 +4,8 @@ Development stand-in for the Eclipse 4diac controller: same nodes, same state
 machines (MOD_StateLogic and SKILL_Control of iec61499-mgmt-py), same error
 codes, and the equipment of cell/modules/filling.yaml and stoppering.yaml with
 the kinematics of cell/sim/module_sim.py: axes with their travel time, dead time
-and end switches, a servo without feedback, a scale that reads a constant.
+and end switches, and a servo without feedback. The scale goes beyond the module
+(which reads a constant): it weighs a vial that Tare zeroes and Dispensing fills.
 Variables stay read-only for clients, and a method answers only when it is
 called on the object it belongs to, exactly like the controller's OPC UA server
 (open62541).
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
@@ -54,8 +56,13 @@ AXES: dict[str, AxisSpec] = {
     "Piston": AxisSpec(3.0, 0.0, 0.5, {"AtLimit": 1.0}),
     "Plunger": AxisSpec(8.0),
 }
-# Inputs without hardware: the module reads the constant of its spec (sim: values).
-CONSTANTS: dict[str, float] = {"Scale/Weight": 2.0}
+# The scale has no hardware; the module reads a constant. The simulator weighs
+# an empty vial instead, and while the needle is down in a dwell the pump stand-in
+# fills it with 3 mL per second: about 3000 mg in the default 1 s, a little more
+# or less for a medicine than for water.
+VIAL_G = 9.75
+FLOW_ML_PER_S = 3.0
+DENSITY_G_PER_ML = (0.98, 1.06)
 
 
 @dataclass(frozen=True)
@@ -161,7 +168,12 @@ class SimulatedModule:
             for name, spec in AXES.items()
             if name in {s.equipment for s in profile.sensors} or name in _used_equipment(profile)
         }
-        self.inputs: dict[str, Any] = {key: CONSTANTS.get(key, False) for key in sensors}
+        self.inputs: dict[str, Any] = {key: False for key in sensors}
+        self.gross_g = VIAL_G
+        self.tare_g = 0.0
+        self.density = 1.0
+        if "Scale/Weight" in self.inputs:
+            self._update_scale()
         self.published: dict[str, Any] = {}
         self.angles: dict[str, float] = {}
         self._update_switches(apply_faults=False)
@@ -383,6 +395,15 @@ class SimulatedModule:
                 rate += behaviour.drive * (boost if elapsed < boost_s else 1.0)
             axis.position = min(1.0, max(0.0, axis.position + rate * dt / axis.spec.travel_s))
         self._update_switches(apply_faults=True)
+        if "Scale/Weight" in self.inputs:
+            dwelling = any(run.skill == "Dwell" for run in self._runs())
+            if dwelling and self.inputs.get("NeedleAxis/AtBottom"):
+                self.gross_g += FLOW_ML_PER_S * self.density * dt
+            self._update_scale()
+
+    def _update_scale(self) -> None:
+        """The reading, to 1 mg."""
+        self.inputs["Scale/Weight"] = round(self.gross_g - self.tare_g, 3)
 
     def _update_switches(self, apply_faults: bool) -> None:
         for name, axis in self.axes.items():
@@ -408,6 +429,8 @@ class SimulatedModule:
         if behaviour.after is not None:
             duration = params.get(behaviour.after, 0.0) if isinstance(behaviour.after, str) else behaviour.after
             run.ends_at = now + float(duration)
+        if skill == "Dwell":
+            self.density = random.uniform(*DENSITY_G_PER_ML)
         if "Angle" in params and behaviour.equipment:
             self.angles[behaviour.equipment] = params["Angle"]
         return run
@@ -424,7 +447,11 @@ class SimulatedModule:
         return 0 if self.clock >= run.ends_at else None
 
     def _result(self, skill: str) -> dict[str, float]:
+        """Results of a run that is done (and what it leaves behind: Tare zeroes the scale)."""
         behaviour = BEHAVIOURS[skill]
+        if skill == "Tare":
+            self.tare_g = self.gross_g
+            self._update_scale()
         if not behaviour.result:
             return {}
         return {behaviour.result: float(self.inputs.get(f"{behaviour.equipment}/{behaviour.result}", 0.0))}

@@ -68,14 +68,24 @@ def test_the_needle_travels_in_two_seconds_with_its_start_boost():
     run(scenario())
 
 
-def test_the_scale_reads_a_constant_that_tare_does_not_change():
+def test_tare_zeroes_the_vial_and_dispensing_fills_about_three_grams():
+    """3 mL per second during the 1 s dwell, at a density of 0.98..1.06 g/mL."""
     sim = module("filling")
 
     async def scenario():
+        assert sim.inputs["Scale/Weight"] == pytest.approx(9.75)
         await start(sim, "Tare")
         took = await until(sim, lambda: state(sim, "Tare") == model.SK_SUCCEEDED)
         assert took == pytest.approx(2.0, abs=0.05)
-        assert sim.inputs["Scale/Weight"] == 2.0
+        assert sim.inputs["Scale/Weight"] == 0.0
+        await start(sim, "Dispensing")
+        took = await until(sim, lambda: state(sim, "Dispensing") == model.SK_SUCCEEDED)
+        # down 2.1 s, dwell 1.0 s, up 2.1 s, weigh 0.2 s
+        assert 5.2 < took < 5.8, took
+        weight = sim.skills["Dispensing"].results["Weight"]
+        assert 2.9 <= weight <= 3.2, weight
+        assert sim.inputs["Scale/Weight"] == weight
+        assert sim.inputs["NeedleAxis/AtTop"]
         await start(sim, "Weigh")
         took = await until(sim, lambda: state(sim, "Weigh") == model.SK_SUCCEEDED)
         assert took == pytest.approx(0.2, abs=0.05)
@@ -83,16 +93,15 @@ def test_the_scale_reads_a_constant_that_tare_does_not_change():
     run(scenario())
 
 
-def test_dispensing_dwells_one_second_and_ends_at_the_top():
+def test_nothing_flows_unless_the_needle_is_down():
     sim = module("filling")
 
     async def scenario():
-        await start(sim, "Dispensing")
-        took = await until(sim, lambda: state(sim, "Dispensing") == model.SK_SUCCEEDED)
-        # down 2.1 s, dwell 1.0 s, up 2.1 s, weigh 0.2 s
-        assert 5.2 < took < 5.8, took
-        assert sim.inputs["NeedleAxis/AtTop"]
-        assert sim.skills["Dispensing"].results == {"Weight": 2.0}
+        await start(sim, "MoveNeedleDown")
+        await until(sim, lambda: state(sim, "MoveNeedleDown") == model.SK_SUCCEEDED)
+        await start(sim, "MoveNeedleUp")
+        await until(sim, lambda: state(sim, "MoveNeedleUp") == model.SK_SUCCEEDED)
+        assert sim.inputs["Scale/Weight"] == pytest.approx(9.75)
 
     run(scenario())
 

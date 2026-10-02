@@ -243,6 +243,12 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .diagram { width: 100%; height: auto; display: block; }
 .module-diagram { max-width: 1180px; }
 .mini-skill-diagram { max-width: 330px; margin: 8px 0; }
+.occupation-diagram { max-width: 640px; }
+.occupation-diagram .state-name { font-size: 14px; }
+.module-alert {
+  margin: 0 0 14px; padding: 8px 12px; border: 1px solid var(--err); border-radius: 8px;
+  color: var(--err); background: var(--panel); font-size: 13px;
+}
 
 .diagram .state-box { fill: var(--panel); stroke: var(--frame-line); stroke-width: 1.5; }
 .diagram .state.acts .state-box { fill: var(--state-act); stroke: var(--state-act-line); }

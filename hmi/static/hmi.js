@@ -227,11 +227,14 @@ function buildModule(profile) {
     })
     .catch(() => {});
 
-  const modulePill = el('span', { class: 'pill off' }, [el('span', { class: 'dot' }), el('span', { text: 'offline' })]);
-  const occText = el('span', { class: 'occ-state' });
-  const occupyButton = el('button', { type: 'button', class: 'primary go', text: 'Occupy' });
-  const releaseButton = el('button', { type: 'button', class: 'stop', text: 'Release' });
-  const occupationAction = (action) => api('/api/occupation', { module: profile.key, action }).catch(() => {});
+  const occupationDiagram = window.HmiDiagrams.occupationSvg(null);
+  window.HmiDiagrams.bindCommands(occupationDiagram, (command) => {
+    api('/api/occupation', { module: profile.key, action: command.toLowerCase() })
+      .then((result) => {
+        if (result.ok && !result.accepted) toast(`${result.errorText}`, true);
+      })
+      .catch(() => {});
+  });
 
   const moduleDiagram = window.HmiDiagrams.moduleSvg(state.config, null);
 
@@ -277,30 +280,23 @@ function buildModule(profile) {
     procedureViews.set(procedure.name, steps);
   }
 
-  const moduleStateText = el('div', { class: 'occ-state' });
-  const missingLine = el('p', { class: 'missing' });
+  const alertLine = el('p', { class: 'module-alert', hidden: true });
+  const diagramHint = el('span', { class: 'hint' });
   const node = el('section', { class: 'module', id: `module-${profile.key}` }, [
     el('div', { class: 'module-head' }, [
       el('h2', { text: profile.title }),
       el('span', { class: 'endpoint', text: profile.summary }),
     ]),
-    el('div', { class: 'control-row' }, [
-      el('div', { class: 'panel control-box' }, [
-        el('div', { class: 'control-label', text: 'Occupation' }),
-        el('div', { class: 'control-status' }, [modulePill, occText]),
-        el('div', { class: 'control-buttons' }, [occupyButton, releaseButton]),
+    alertLine,
+    el('div', { class: 'panel occupation-panel' }, [
+      el('div', { class: 'panel-head' }, [
+        el('h2', { text: 'Occupation' }),
+        el('span', { class: 'hint', text: 'only the session that occupies the module commands it' }),
       ]),
-      el('div', { class: 'panel control-box' }, [
-        el('div', { class: 'control-label', text: 'Module controls' }),
-        el('div', { class: 'control-status' }, [moduleStateText]),
-        missingLine,
-      ]),
+      occupationDiagram,
     ]),
     el('div', { class: 'panel diagram-panel' }, [
-      el('div', { class: 'panel-head' }, [
-        el('h2', { text: 'State machine' }),
-        el('span', { class: 'hint', text: 'the box that breathes is the current state' }),
-      ]),
+      el('div', { class: 'panel-head' }, [el('h2', { text: 'State machine' }), diagramHint]),
       moduleDiagram,
     ]),
     hasSequences
@@ -340,18 +336,13 @@ function buildModule(profile) {
       : null,
   ]);
 
-  occupyButton.addEventListener('click', () => occupationAction('occupy'));
-  releaseButton.addEventListener('click', () => occupationAction('release'));
 
   return {
     node,
-    modulePill,
-    occText,
-    occupyButton,
-    releaseButton,
+    occupationDiagram,
+    alertLine,
+    diagramHint,
     moduleDiagram,
-    moduleStateText,
-    missingLine,
     sensorNodes,
     cards,
     procedureViews,
@@ -362,20 +353,13 @@ function buildModule(profile) {
 function renderConfig(config) {
   const tabs = document.getElementById('tabs');
   const main = document.getElementById('modules');
-  const pills = document.getElementById('conn-pills');
   tabs.textContent = '';
   main.textContent = '';
-  pills.textContent = '';
   state.ui = {};
   for (const profile of config.modules) {
     const ui = buildModule(profile);
     state.ui[profile.key] = ui;
     main.appendChild(ui.node);
-    const pill = el('span', { class: 'pill off' }, [
-      el('span', { class: 'dot' }), el('span', { text: profile.title }),
-    ]);
-    pills.appendChild(pill);
-    ui.connPill = pill;
     tabs.appendChild(el('button', {
       type: 'button', class: '', text: profile.title,
       onclick: () => selectModule(profile.key),
@@ -445,15 +429,6 @@ function updateSkill(ui, module, skillName, skill) {
   }
 }
 
-function setPill(pill, module) {
-  const classes = module.connected ? 'pill on' : (module.missing.length ? 'pill off' : 'pill stale');
-  pill.className = classes;
-  const text = module.connected ? module.moduleState.name :
-    (module.detail || (module.missing.length ? 'address space incomplete' : 'not connected'));
-  const label = pill.querySelector('span:last-child');
-  if (label.textContent !== text) label.textContent = text;
-}
-
 /**
  * A composite (module level) skill runs private instances of its skill
  * primitives and does not touch the standalone skill variables, only its own
@@ -480,26 +455,29 @@ function activeSteps(module) {
 }
 
 function updateModule(ui, module) {
-  setPill(ui.connPill, module);
-  setPill(ui.modulePill, module);
   window.HmiDiagrams.setActive(ui.moduleDiagram, module.moduleState.value);
-  const stateText = `Module state: ${module.moduleState.name}` +
-    (module.moduleState.status !== 'Good' ? ` (${module.moduleState.status})` : '');
-  if (ui.moduleStateText.textContent !== stateText) ui.moduleStateText.textContent = stateText;
   window.HmiDiagrams.setCommands(
     ui.moduleDiagram, module.commands,
     module.occupier ? 'not possible in this state' : 'occupy the module first',
   );
-  ui.occupyButton.disabled = !module.occupation.occupy;
-  ui.releaseButton.disabled = !module.occupation.release;
-  const occText = module.occupier
-    ? 'this HMI occupies the module'
-    : (module.occupied ? 'occupied by another session' : 'module is free');
-  const full = `${module.occupied ? 'Occupied' : 'Free'} - ${occText}`;
-  if (ui.occText.textContent !== full) ui.occText.textContent = full;
+  const hint = module.occupier ? 'press a command on its line' : 'occupy the module to command it';
+  if (ui.diagramHint.textContent !== hint) ui.diagramHint.textContent = hint;
 
-  const missing = module.missing.length ? `missing nodes: ${module.missing.join(', ')}` : '';
-  if (ui.missingLine.textContent !== missing) ui.missingLine.textContent = missing;
+  let occupation = 0;
+  if (module.occupier) occupation = 1;
+  else if (module.occupied) occupation = 2;
+  window.HmiDiagrams.setActive(ui.occupationDiagram, occupation);
+  window.HmiDiagrams.setCommands(ui.occupationDiagram, {
+    Occupy: module.occupation.occupy && !module.occupied,
+    Release: module.occupation.release,
+  }, module.occupied && !module.occupier ? 'another session occupies the module' : 'not possible now');
+
+  // Only what is wrong with the connection is shown; the drawings show the rest.
+  let alert = '';
+  if (module.missing.length) alert = `The module's address space is incomplete, missing: ${module.missing.join(', ')}`;
+  else if (!module.connected) alert = `Not connected to ${module.endpoint}${module.detail ? ` (${module.detail})` : ''}; the values shown are stale.`;
+  if (ui.alertLine.textContent !== alert) ui.alertLine.textContent = alert;
+  ui.alertLine.hidden = !alert;
 
   for (const [name, valueNode] of ui.sensorNodes) {
     const sensor = module.sensors[name];

@@ -206,6 +206,13 @@ def test_drawings_are_the_controller_machines():
     assert drawn_pairs(drawing("SKILL")) == {(a, b) for a, b, _, _ in model.SKILL_DIAGRAM}
 
 
+def test_the_occupation_drawing_offers_occupy_and_release_only():
+    occupation = drawing("OCCUPATION")
+    assert set(occupation["positions"]) == {0, 1, 2}
+    commands = {(src, dst, label) for src, dst, _, label, _, _ in occupation["edges"] if label}
+    assert commands == {(0, 1, "Occupy"), (1, 0, "Release")}
+
+
 def test_only_reset_returns_a_skill_to_idle():
     assert {a for a, b in drawn_pairs(drawing("SKILL")) if b == model.SK_IDLE} == {model.SK_ABORTED}
 
@@ -219,7 +226,7 @@ def test_every_command_is_written_on_its_line():
 
 def test_drawings_are_tidy():
     """No box on a box, no line through a box or across another line, no label on a foreign line."""
-    for name in ("MODULE", "SKILL"):
+    for name in ("MODULE", "SKILL", "OCCUPATION"):
         machine = drawing(name)
         states = boxes(machine)
         codes = sorted(states)

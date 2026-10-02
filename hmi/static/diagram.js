@@ -271,6 +271,43 @@ function miniSkillSvg(config, current) {
   return root;
 }
 
+/*
+ * The occupation of the module (MOD_OccupationLogic): Occupy from Free takes it
+ * for this HMI, Release gives it back. Another session takes and gives back the
+ * module on its own, so those lines carry no command.
+ */
+const OCCUPATION_STATES = { 0: 'Free', 1: 'This HMI', 2: 'Another session' };
+const OCCUPATION = {
+  box: { w: 160, h: 40 },
+  positions: {
+    2: [10, 30],     // Another session
+    0: [260, 30],    // Free
+    1: [530, 30],    // This HMI
+  },
+  frames: [],
+  edges: [
+    [0, 1, 'M420,38 H530', 'Occupy', 475, 38],
+    [1, 0, 'M530,62 H420', 'Release', 475, 62],
+    [0, 2, 'M260,38 H170', '', 0, 0],
+    [2, 0, 'M170,62 H260', '', 0, 0],
+  ],
+};
+
+function occupationSvg(current) {
+  const root = svgEl('svg', {
+    viewBox: '0 0 700 104', class: 'diagram occupation-diagram',
+    preserveAspectRatio: 'xMidYMid meet',
+  });
+  root.appendChild(defs(root, 5));
+  const kinds = { 0: 'waits', 1: 'waits', 2: 'waits' };
+  drawMachine(root, { states: OCCUPATION_STATES, kinds }, OCCUPATION);
+  root.appendChild(svgText('Another session takes and gives back the module itself.', {
+    x: 10, y: 96, class: 'frame-note',
+  }));
+  setActive(root, current);
+  return root;
+}
+
 /* Pressing a command on a drawing: onPress(command) for an enabled one. */
 function bindCommands(root, onPress) {
   const press = (target) => {
@@ -303,4 +340,6 @@ function setCommands(root, enabled, why) {
   }
 }
 
-window.HmiDiagrams = { moduleSvg, miniSkillSvg, setActive, bindCommands, setCommands };
+window.HmiDiagrams = {
+  moduleSvg, miniSkillSvg, occupationSvg, setActive, bindCommands, setCommands,
+};

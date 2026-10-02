@@ -16,7 +16,9 @@ function svgText(value, attrs) {
   return node;
 }
 
-const MARKER_ID = 'hmi-arrow';
+// Every drawing has its own arrowhead: a url(#id) resolves to the first element
+// with that id, and the first drawing may sit in a hidden module tab.
+let markerCount = 0;
 
 function nameOf(table, code, fallback) {
   const value = table[String(code)];
@@ -31,10 +33,13 @@ function kindOf(table, code, fallback) {
   return String(value);
 }
 
-function defs() {
+function defs(root) {
+  markerCount += 1;
+  const id = `hmi-arrow-${markerCount}`;
+  root.setAttribute('data-marker', id);
   const node = svgEl('defs');
   const marker = svgEl('marker', {
-    id: MARKER_ID, viewBox: '0 0 10 10', refX: 9, refY: 5,
+    id, viewBox: '0 0 10 10', refX: 9, refY: 5,
     markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse',
   });
   marker.appendChild(svgEl('path', { d: 'M0,0 L10,5 L0,10 z', class: 'arrowhead' }));
@@ -78,10 +83,15 @@ function setActive(root, code) {
   if (!route) return;
   const dot = svgEl('circle', { r: MARKER_RADIUS, class: 'state-dot' });
   const motion = svgEl('animateMotion', {
-    dur: '0.9s', path: route, fill: 'remove', rotate: 'auto', calcMode: 'linear',
+    dur: '0.9s', begin: 'indefinite', path: route, fill: 'remove', rotate: 'auto', calcMode: 'linear',
   });
   dot.appendChild(motion);
   root.appendChild(dot);
+  // The animation runs on the drawing's own timeline, which started at load:
+  // start it now, and take the dot away when it has arrived.
+  motion.addEventListener('endEvent', () => dot.remove());
+  setTimeout(() => dot.remove(), 1500);
+  motion.beginElement();
 }
 
 function commandBox(value, x, y) {
@@ -110,17 +120,17 @@ function noteBox(value, x, y) {
   return group;
 }
 
-function edge(path, label, style, x, y, into) {
+function edge(path, label, style, x, y, marker) {
   const group = svgEl('g', { class: `edge ${style}` });
   group.appendChild(svgEl('path', {
-    d: path, class: 'edge-line', 'marker-end': `url(#${MARKER_ID})`,
+    d: path, class: 'edge-line', 'marker-end': `url(#${marker})`,
   }));
   if (style === 'command') {
     group.appendChild(commandBox(label, x, y));
   } else if (label) {
     group.appendChild(noteBox(label, x, y));
   }
-  return { group, path, into };
+  return { group, path };
 }
 
 /*
@@ -143,7 +153,7 @@ function drawMachine(root, config, machine) {
     }
   }
   for (const [, into, path, label, x, y] of machine.edges) {
-    root.appendChild(edge(path, label, label ? 'command' : 'sc', x, y).group);
+    root.appendChild(edge(path, label, label ? 'command' : 'sc', x, y, root.getAttribute('data-marker')).group);
     if (!root.getAttribute(`data-into-${into}`)) root.setAttribute(`data-into-${into}`, path);
   }
   for (const [code, [x, y]] of Object.entries(machine.positions)) {
@@ -196,7 +206,7 @@ function moduleSvg(config, current) {
     viewBox: '0 0 1090 372', class: 'diagram module-diagram',
     preserveAspectRatio: 'xMidYMid meet',
   });
-  root.appendChild(defs());
+  root.appendChild(defs(root));
   root.appendChild(svgText('Module state machine (PackML)', { x: 16, y: 18, class: 'frame-label' }));
   drawMachine(root, { states: config.moduleStates, kinds: config.moduleStateKinds }, MODULE);
   root.appendChild(svgText('also after a failed procedure or the stop timeout', {
@@ -248,7 +258,7 @@ function miniSkillSvg(config, current) {
     viewBox: '0 0 320 266', class: 'diagram mini-skill-diagram',
     preserveAspectRatio: 'xMidYMid meet',
   });
-  root.appendChild(defs());
+  root.appendChild(defs(root));
   drawMachine(root, { states: config.skillStates, kinds: config.skillStateKinds }, SKILL);
   setActive(root, current);
   return root;

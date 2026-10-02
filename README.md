@@ -85,18 +85,19 @@ tests/                 unit tests and end to end tests against the simulator
   HMI it asks once with `Occupy` whether the session still owns an occupied
   module (the controller accepts that only for the owner).
 * **Reset follows the specification.** `Reset` is accepted only from `Aborted`
-  (opcua-filling.md / opcua-stoppering.md, skill command table), so the button
-  is enabled there only; a skill in `Succeeded` or `Failed` is re-run with
-  `Start`, which needs no `Reset`. Each skill card states which applies in its
-  current state, so the greyed button is never a dead end.
+  (opcua-filling.md / opcua-stoppering.md, skill command table), so it can be
+  pressed there only; a skill in `Succeeded` or `Failed` is re-run with `Start`,
+  which needs no `Reset`. A faded command tells why on hover, so it is never a
+  dead end.
 * **Equipment locks.** A skill holds its equipment while it runs; a module level
   skill holds an equipment from the first step that uses it to the last one, as
   the controller's lock tokens do. Start of a skill that needs held equipment is
   disabled and the card says who holds it.
 * **Errors where they belong.** The controller keeps `ErrorID` after Abort and
   Reset; the page shows it only for `Failed` and `Aborted`.
-* **Stale values are shown as stale.** On connection loss all values are marked
-  stale and every command is disabled; the page reconnects by itself.
+* **Stale values are shown as stale.** On connection loss a warning above the
+  module says so, every command is disabled, and the page reconnects by itself.
+  Otherwise the page shows no status pills: the drawings show the states.
 * **Transitions are logged.** Every refused command with its ErrorID and text,
   and every skill that ends as Failed, goes to the message log, whether or not a
   page is open.
@@ -107,6 +108,12 @@ tests/                 unit tests and end to end tests against the simulator
   its diagram, and its `Start` is disabled because the composite holds the
   equipment. The step names the primitive it runs (`ArmIn` runs `MoveArm`), and
   the steps of a stop sequence are linked as well. Everything comes from the same subscription as everything else.
+* **Commands are pressed on the drawings.** There are no command buttons: every
+  command bubble on a drawing is its button (click, or Enter or Space when it has
+  the focus), live when the controller would accept the command and faded when
+  not. The module is commanded on its state machine, a skill on its card, and the
+  occupation on its own small drawing (Free, This HMI, Another session) with
+  `Occupy` and `Release`. Start takes the parameters typed on the card.
 * **State machine drawings.** Both machines are drawn in the PackML style: blue
   acting states, orange wait states, every command in a bubble on its line, and
   unlabelled lines for state complete. A command that applies to several states
@@ -117,8 +124,8 @@ tests/                 unit tests and end to end tests against the simulator
   the module in `Clearing` or `Stopped`) returns a skill to `Idle`, as in
   `SKILL_Control`. Every line has its own lane, which `tests/test_model.py`
   checks: no line through a box or across another line. No box is painted
-  over: the current state breathes, and a dot travels along the transition it just
-  came through. The page has a light theme by default and a dark theme; the button
+  over: the current state breathes, and a small orange dot travels along the
+  transition it just came through. The page has a light theme by default and a dark theme; the button
   in the header switches and remembers the choice, and `?theme=dark` in the URL
   forces one.
 * **Three panels of skills.** `Sequences` holds the module level skills with their
@@ -183,7 +190,10 @@ a running Resetting procedure to their parent. The equipment moves as in
 its 200 ms start boost, the piston in 3 s from half way, the plunger in 8 s; a
 skill that waits for an end switch succeeds at once when it is already there,
 open-loop skills run exactly their duration. The scale has no hardware, so the
-module reads a constant 2.0 g, which `Tare` does not change. It is a development
+module reads a constant 2.0 g. The simulator goes further: it weighs an empty vial
+(9.75 g), `Tare` zeroes the reading, and while the needle is down in the dwell of
+`Dispensing` 3 mL per second flow into the vial, at a density of 0.98 to 1.06 g/mL,
+so the default 1 s dwell gives about 3000 mg. It is a development
 and test aid, not a
 controller: it has no start conditions, no stop sequences except the ones in the
 documents, and no safety functions.

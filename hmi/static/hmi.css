@@ -27,6 +27,7 @@
   --frame: #f2f5fa;
   --frame-line: #c7d0de;
   --frame-text: #6b788c;
+  --dot: #ff7a00;
 }
 
 :root[data-theme="dark"] {
@@ -58,6 +59,7 @@
   --frame: #141a23;
   --frame-line: #333e4d;
   --frame-text: #93a1b5;
+  --dot: #ff9a2e;
 }
 
 * { box-sizing: border-box; }
@@ -240,14 +242,14 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .diagram-panel .panel-head { margin-bottom: 0; }
 .diagram { width: 100%; height: auto; display: block; }
 .module-diagram { max-width: 1180px; }
-.mini-skill-diagram { max-width: 320px; margin: 8px 0; }
+.mini-skill-diagram { max-width: 330px; margin: 8px 0; }
 
 .diagram .state-box { fill: var(--panel); stroke: var(--frame-line); stroke-width: 1.5; }
 .diagram .state.acts .state-box { fill: var(--state-act); stroke: var(--state-act-line); }
 .diagram .state.waits .state-box { fill: var(--state-wait); stroke: var(--state-wait-line); }
 .diagram .state.active .state-box { animation: breathe 2s ease-in-out infinite; }
 .diagram .state.active .state-name { font-weight: 700; }
-.diagram .state-dot { fill: var(--accent); }
+.diagram .state-dot { fill: var(--dot); }
 @keyframes breathe {
   0%, 100% { stroke-width: 2; }
   50% { stroke-width: 4.5; }
@@ -258,6 +260,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .diagram .state-name { font: 600 15px "Segoe UI", system-ui, sans-serif; fill: var(--text); }
 .mini-skill-diagram .state-name { font-size: 11px; }
 .mini-skill-diagram .state-box { stroke-width: 1.2; }
+.mini-skill-diagram .edge-line { stroke-width: 1.1; }
 .diagram .edge-line { fill: none; stroke: var(--edge); stroke-width: 1.6; }
 .diagram .arrowhead { fill: var(--edge); }
 .diagram .command-box { fill: var(--command); stroke: var(--command-line); stroke-width: 1.4; }

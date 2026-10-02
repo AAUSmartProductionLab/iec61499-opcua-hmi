@@ -33,14 +33,14 @@ function kindOf(table, code, fallback) {
   return String(value);
 }
 
-function defs(root) {
+function defs(root, size = 7) {
   markerCount += 1;
   const id = `hmi-arrow-${markerCount}`;
   root.setAttribute('data-marker', id);
   const node = svgEl('defs');
   const marker = svgEl('marker', {
     id, viewBox: '0 0 10 10', refX: 9, refY: 5,
-    markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse',
+    markerWidth: size, markerHeight: size, orient: 'auto-start-reverse',
   });
   marker.appendChild(svgEl('path', { d: 'M0,0 L10,5 L0,10 z', class: 'arrowhead' }));
   node.appendChild(marker);
@@ -61,7 +61,7 @@ function stateBox(spec, x, y, width, height, active, code) {
   return group;
 }
 
-const MARKER_RADIUS = 5;
+const MARKER_RADIUS = 3.5;
 
 /**
  * Show the current state without painting over it: the box of the current state
@@ -229,36 +229,36 @@ function moduleSvg(config, current) {
  * Nothing else returns to Idle.
  */
 const SKILL = {
-  box: { w: 84, h: 28 },
+  box: { w: 84, h: 30 },
   positions: {
-    0: [40, 20],     // Idle
-    3: [40, 84],     // Succeeded
-    4: [40, 148],    // Failed
-    1: [214, 84],    // Running
-    2: [214, 148],   // Stopping
-    5: [120, 234],   // Aborted
+    0: [40, 22],     // Idle
+    3: [40, 96],     // Succeeded
+    4: [40, 174],    // Failed
+    1: [220, 96],    // Running
+    2: [220, 174],   // Stopping
+    5: [120, 266],   // Aborted
   },
   frames: [
-    { name: 'abort', x: 22, y: 4, w: 294, h: 196, members: [0, 1, 2, 3, 4] },
-    { name: 'start', x: 30, y: 12, w: 104, h: 176, members: [0, 3, 4] },
+    { name: 'abort', x: 22, y: 4, w: 300, h: 218, members: [0, 1, 2, 3, 4] },
+    { name: 'start', x: 30, y: 12, w: 104, h: 202, members: [0, 3, 4] },
   ],
   edges: [
-    ['start', 1, 'M134,34 H256 V84', 'Start', 195, 34],
-    [1, 3, 'M214,94 H124', '', 0, 0],
-    [1, 4, 'M214,106 H174 V156 H124', '', 0, 0],
-    [1, 2, 'M256,112 V148', 'Stop', 256, 130],
-    [2, 4, 'M214,166 H124', '', 0, 0],
-    ['abort', 5, 'M162,200 V234', 'Abort', 162, 217],
-    [5, 0, 'M120,248 H10 V34 H40', 'Reset', 62, 248],
+    ['start', 1, 'M134,37 H262 V96', 'Start', 198, 37],
+    [1, 3, 'M220,104 H124', '', 0, 0],
+    [1, 4, 'M220,118 H178 V182 H124', '', 0, 0],
+    [1, 2, 'M262,126 V174', 'Stop', 262, 150],
+    [2, 4, 'M220,196 H124', '', 0, 0],
+    ['abort', 5, 'M162,222 V266', 'Abort', 162, 244],
+    [5, 0, 'M120,281 H10 V37 H40', 'Reset', 64, 281],
   ],
 };
 
 function miniSkillSvg(config, current) {
   const root = svgEl('svg', {
-    viewBox: '0 0 320 266', class: 'diagram mini-skill-diagram',
+    viewBox: '0 0 330 300', class: 'diagram mini-skill-diagram',
     preserveAspectRatio: 'xMidYMid meet',
   });
-  root.appendChild(defs(root));
+  root.appendChild(defs(root, 4));
   drawMachine(root, { states: config.skillStates, kinds: config.skillStateKinds }, SKILL);
   setActive(root, current);
   return root;

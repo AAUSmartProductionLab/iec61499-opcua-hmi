@@ -5,7 +5,7 @@ const MODULE_KEY = 'opcua-hmi-module';
 const THEME_KEY = 'opcua-hmi-theme';
 
 const HINTS = {
-  Succeeded: 'Goal reached. Start runs it again; Reset applies after Abort.',
+  Succeeded: 'Goal reached; back to Idle by itself in a moment. Start runs it again.',
   Failed: 'Start runs it again; Reset applies after Abort.',
   Aborted: 'Aborted. Reset (or module Clear) brings it back to Idle.',
   Running: 'Running. Stop ends it gently, Abort drops the outputs.',

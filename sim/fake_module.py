@@ -39,6 +39,8 @@ FAULT_INVARIANT = "invariant"  # end switches never open again
 WAIT_FREE = 0.5
 # stop_timeout of the module specs: Stopping waits this long for running skills.
 STOP_TIMEOUT = 10.0
+# SUCCEEDED_FOR of SKILL_Control: a skill that succeeded returns to Idle after this.
+SUCCEEDED_FOR = 1.5
 
 
 @dataclass(frozen=True)
@@ -126,6 +128,7 @@ class SkillRuntime:
     run: Run | None = None
     done: bool = False       # the run ended at once (already at its end switch)
     fail_at: float = 0.0
+    idle_at: float = 0.0     # Succeeded returns to Idle then
 
 
 @dataclass
@@ -142,6 +145,7 @@ class StepRuntime:
     name: str
     state: int = model.SK_IDLE
     error_id: int = 0
+    idle_at: float = 0.0
 
 
 class SimulatedModule:
@@ -350,6 +354,7 @@ class SimulatedModule:
             runtime.error_id = error_id
         elif state in (model.SK_RUNNING, model.SK_SUCCEEDED):
             runtime.error_id = 0
+        runtime.idle_at = self.clock + SUCCEEDED_FOR if state == model.SK_SUCCEEDED else 0.0
         # ErrorID first: the controller publishes both in one write
         await self.write(f"Skills/{name}/ErrorID", runtime.error_id)
         await self.write(f"Skills/{name}/State", state)
@@ -358,6 +363,7 @@ class SimulatedModule:
         step = self.steps[key]
         step.state = state
         step.error_id = error_id
+        step.idle_at = self.clock + SUCCEEDED_FOR if state == model.SK_SUCCEEDED else 0.0
         await self.write(f"{key}/ErrorID", error_id)
         await self.write(f"{key}/State", state)
 
@@ -692,9 +698,16 @@ class SimulatedModule:
             work.append(self.set_module_state(target))
         self._move_axes(dt * self.speed)
         work.append(self.publish_inputs())
-        for runtime in self.skills.values():
+        for name, runtime in self.skills.items():
             if runtime.state in (model.SK_RUNNING, model.SK_STOPPING):
                 work.append(self._tick_skill(runtime))
+            elif runtime.state == model.SK_SUCCEEDED and runtime.idle_at and self.clock >= runtime.idle_at:
+                runtime.idle_at = 0.0
+                work.append(self.set_skill_state(name, model.SK_IDLE))
+        for key, step in self.steps.items():
+            if step.state == model.SK_SUCCEEDED and step.idle_at and self.clock >= step.idle_at:
+                step.idle_at = 0.0
+                work.append(self.set_step_state(key, model.SK_IDLE))
         for procedure in self.procedures.values():
             if procedure.active:
                 work.append(self._tick_procedure(procedure))

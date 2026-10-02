@@ -472,17 +472,16 @@ def test_tare_zeroes_the_scale_and_dispensing_fills_about_three_grams(client):
     assert wait_for(weighed, timeout=15), view(client, "filling")["skills"]["Weigh"]
 
 
-def test_a_succeeded_skill_stays_succeeded_and_starts_again(client):
-    """As on the controller: no way back to Idle but Abort and Reset; Start runs it again."""
+def test_a_succeeded_skill_returns_to_idle_by_itself(client):
+    """SKILL_Control: Succeeded -> Idle after 1.5 s; Start runs it again from either."""
     to_execute(client, "stoppering")
     idle_skill(client, "stoppering", "MoveArm")
     accepted(skill_command(client, "stoppering", "MoveArm", "Start", {"Angle": 120, "Settle": 0.5}))
     wait_skill(client, "stoppering", "MoveArm", "Succeeded")
-    time.sleep(2.0)
-    skill = view(client, "stoppering")["skills"]["MoveArm"]
-    assert skill["stateName"] == "Succeeded"
+    skill = wait_skill(client, "stoppering", "MoveArm", "Idle", timeout=5)
     assert skill["commands"]["Start"] is True
     assert skill["commands"]["Reset"] is False
+    assert skill["errorId"] == 0
     accepted(skill_command(client, "stoppering", "MoveArm", "Start", {"Angle": 60, "Settle": 0.5}))
     wait_skill(client, "stoppering", "MoveArm", "Running", timeout=5)
     wait_skill(client, "stoppering", "MoveArm", "Succeeded")
@@ -565,7 +564,9 @@ def test_stoppering_cycle_runs_to_success(client):
     accepted(skill_command(client, "stoppering", "Stoppering", "Start"))
     wait_skill(client, "stoppering", "Stoppering", "Running")
     skill = wait_skill(client, "stoppering", "Stoppering", "Succeeded", timeout=90)
-    assert [step["stateName"] for step in skill["steps"]] == ["Succeeded"] * 6
+    # each step succeeded; the early ones are back in Idle by now
+    assert all(step["stateName"] in ("Succeeded", "Idle") and step["errorId"] == 0
+               for step in skill["steps"]), skill["steps"]
     # the last step raises the piston off its limit switch
     assert value_of(view(client, "stoppering"), "Equipment/Piston/AtLimit") is False
 
@@ -635,12 +636,15 @@ def test_sensor_fault_makes_the_skill_fail_with_timeout(client, simulator):
 
 
 def test_log_contains_refusals_and_failures(client):
-    response = client.get("/api/log?limit=200", headers={"X-Session-Id": SESSION})
-    entries = response.get_json()["entries"]
-    texts = [entry["text"] for entry in entries]
+    def entries():
+        return client.get("/api/log?limit=200", headers={"X-Session-Id": SESSION}).get_json()["entries"]
+
+    # the transition watcher logs within its next round (0.1 s)
+    assert wait_for(lambda: any("Timeout" in entry["text"] for entry in entries()), timeout=3), entries()
+    texts = [entry["text"] for entry in entries()]
     assert any("refused" in text for text in texts)
     assert any("Timeout" in text for text in texts), texts
-    assert any(entry["level"] in ("warn", "error") for entry in entries)
+    assert any(entry["level"] in ("warn", "error") for entry in entries())
 
 
 def test_unknown_module_command_and_parameters_are_rejected(client):

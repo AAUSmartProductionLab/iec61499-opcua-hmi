@@ -205,6 +205,7 @@ SKILL_DIAGRAM: tuple[tuple[int, int, str, str], ...] = (
     (SK_STOPPING, SK_ABORTED, "Abort, module Abort", "command"),
     (SK_SUCCEEDED, SK_ABORTED, "Abort, module Abort", "command"),
     (SK_FAILED, SK_ABORTED, "Abort, module Abort", "command"),
+    (SK_SUCCEEDED, SK_IDLE, "after 1.5 s", "sc"),
     (SK_ABORTED, SK_IDLE, "Reset, module Clearing or Stopped", "command"),
 )
 

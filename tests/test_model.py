@@ -213,8 +213,11 @@ def test_the_occupation_drawing_offers_occupy_and_release_only():
     assert commands == {(0, 1, "Occupy"), (1, 0, "Release")}
 
 
-def test_only_reset_returns_a_skill_to_idle():
-    assert {a for a, b in drawn_pairs(drawing("SKILL")) if b == model.SK_IDLE} == {model.SK_ABORTED}
+def test_a_skill_returns_to_idle_after_reset_or_by_itself_after_success():
+    """Failed and Stopping never return to Idle; Succeeded does after 1.5 s (SKILL_Control)."""
+    assert {a for a, b in drawn_pairs(drawing("SKILL")) if b == model.SK_IDLE} == {
+        model.SK_ABORTED, model.SK_SUCCEEDED
+    }
 
 
 def test_every_command_is_written_on_its_line():

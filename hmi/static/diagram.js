@@ -237,8 +237,8 @@ function moduleSvg(config, current) {
  * The skill machine of the controller (SKILL_Control). Start is accepted in
  * Idle, Succeeded and Failed (the inner frame); Stop passes Stopping and ends
  * in Failed with ErrorID 7; Abort leaves every state in the outer frame; Reset
- * (or the module in Clearing or Stopped) brings an aborted skill back to Idle.
- * Nothing else returns to Idle.
+ * (or the module in Clearing or Stopped) brings an aborted skill back to Idle,
+ * and a skill that succeeded returns to Idle by itself after 1.5 s.
  */
 const SKILL = {
   box: { w: 84, h: 30 },
@@ -257,6 +257,7 @@ const SKILL = {
   edges: [
     ['start', 1, 'M134,37 H262 V96', 'Start', 198, 37],
     [1, 3, 'M220,104 H124', '', 0, 0],
+    [3, 0, 'M82,96 V52', '', 0, 0],
     [1, 4, 'M220,118 H178 V182 H124', '', 0, 0],
     [1, 2, 'M262,126 V174', 'Stop', 262, 150],
     [2, 4, 'M220,196 H124', '', 0, 0],

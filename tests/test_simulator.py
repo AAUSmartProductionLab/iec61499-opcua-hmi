@@ -199,3 +199,22 @@ def test_a_failed_resetting_procedure_aborts_the_module():
         assert sim.steps["Procedures/Resetting/MoveNeedleUp"].error_id == model.ERR_TIMEOUT
 
     run(scenario())
+
+
+def test_a_skill_that_succeeded_returns_to_idle_after_one_and_a_half_seconds():
+    """SKILL_Control: Succeeded -> Idle by itself (SUCCEEDED_FOR); steps of a sequence as well."""
+    sim = module("filling")
+
+    async def scenario():
+        await start(sim, "Tare")
+        await until(sim, lambda: state(sim, "Tare") == model.SK_SUCCEEDED)
+        stayed = await until(sim, lambda: state(sim, "Tare") == model.SK_IDLE)
+        assert stayed == pytest.approx(1.5, abs=0.05)
+        await start(sim, "Dispensing")
+        await until(sim, lambda: state(sim, "Dispensing") == model.SK_SUCCEEDED)
+        await until(sim, lambda: state(sim, "Dispensing") == model.SK_IDLE)
+        assert sim.skills["Dispensing"].results["Weight"] > 0      # the result stays published
+        steps = [s for k, s in sim.steps.items() if k.startswith("Skills/Dispensing/Execute/")]
+        assert all(step.state == model.SK_IDLE and step.error_id == 0 for step in steps)
+
+    run(scenario())

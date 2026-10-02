@@ -39,8 +39,8 @@ simulator port is taken.
 | `--endpoint KEY=URL` | endpoint of a module, repeatable |
 | `--simulate [KEYS]` | run the simulator for these modules (all when omitted) |
 | `--sim-endpoint URL` | endpoint the simulated modules serve on |
-| `--fault sensor` | simulator only: end switch sensors never reach their target, so skills fail with Timeout (3) |
-| `--fault invariant` | simulator only: both needle end switches are on, so the needle skills fail with InvariantViolated (2) |
+| `--fault sensor` | simulator only: end switches never close, so skills that wait for one fail with Timeout (3) |
+| `--fault invariant` | simulator only: end switches never open again, so a needle move ends with both on: InvariantViolated (2) |
 | `--sim-speed 0.25` | simulator only: quarter speed, so the sequences can be watched in the state machines |
 | `--sampling-ms 200` | subscription sampling interval |
 | `--host`, `--port` | where the web interface listens |
@@ -107,13 +107,16 @@ tests/                 unit tests and end to end tests against the simulator
   its diagram, and its `Start` is disabled because the composite holds the
   equipment. The step names the primitive it runs (`ArmIn` runs `MoveArm`), and
   the steps of a stop sequence are linked as well. Everything comes from the same subscription as everything else.
-* **State machine drawings.** The module state machine (PackML) is drawn in the
-  PackML style: blue acting states, orange wait states, PackML command bubbles on
-  the lines and `SC` for state complete. Every skill card carries the skill machine
-  of the controller (`SKILL_Control`): `Start` from `Idle`, `Succeeded` or `Failed`;
-  `Stop` through `Stopping` to `Failed` (ErrorID 7); `Abort` from every state in
-  the dashed frame to `Aborted`; `Reset` (or the module in `Clearing` or
-  `Stopped`) back to `Idle`. Nothing else returns to `Idle`. No box is painted
+* **State machine drawings.** Both machines are drawn in the PackML style: blue
+  acting states, orange wait states, every command in a bubble on its line, and
+  unlabelled lines for state complete. A command that applies to several states
+  leaves a dashed frame around them: module Stop from the inner frame, module
+  Abort from the outer one; skill Start from the frame around `Idle`, `Succeeded`
+  and `Failed`, skill Abort from the frame around every state but `Aborted`.
+  `Stop` passes `Stopping` and ends in `Failed` (ErrorID 7), and only `Reset` (or
+  the module in `Clearing` or `Stopped`) returns a skill to `Idle`, as in
+  `SKILL_Control`. Every line has its own lane, which `tests/test_model.py`
+  checks: no line through a box or across another line. No box is painted
   over: the current state breathes, and a dot travels along the transition it just
   came through. The page has a light theme by default and a dark theme; the button
   in the header switches and remembers the choice, and `?theme=dark` in the URL
@@ -157,7 +160,8 @@ one (or `IEC61499_MGMT_PY`) and checks the profiles against the module specs in
 `cell/modules`, the state and error numbers against `modgen`, and the command
 rules and the skill diagram against the generated `MOD_StateLogic` and
 `SKILL_Control`; it is skipped without that checkout. `tests/test_link.py` checks
-the method calls and a quiet connection.
+the method calls and a quiet connection, `tests/test_simulator.py` the simulated
+equipment against the module specs.
 `tests/test_integration.py` and `tests/test_reconnect.py` start the simulator and
 drive the whole API: occupy/release, reset/start/execute, skill starts, equipment
 locks, abort and clear, refusals with their ErrorID, the sequences and a
@@ -168,13 +172,18 @@ controller restart with automatic re-occupation.
 `sim/fake_module.py` builds the address space from the same profiles as the
 client, so node names, types and defaults always match. It implements both state
 machines as the controller runs them, the occupation, the equipment locks,
-realistic motion times and the documented refusals. As on the controller, a skill
+the equipment of `cell/modules/filling.yaml` and `stoppering.yaml` and the documented
+refusals. As on the controller, a skill
 stays in `Succeeded` or `Failed` until the next Start or Abort, a Stop passes
 `Stopping` and ends in `Failed` with Interrupted (7), a module Abort aborts every
 skill and step, and a module level skill accepts Start and fails with Busy (6)
-when a step finds its equipment held. The needle axis is a single axis: its two
-end switches are never both on, which is why a move does not succeed at once. The
-scale has no hardware, so a random weight is published about once per second and
-`Tare` brings it back to zero. It is a development and test aid, not a
+when a step finds its equipment held; a Stop leaves the steps of a sequence or of
+a running Resetting procedure to their parent. The equipment moves as in
+`cell/sim/module_sim.py`: the needle travels in 2 s after a 0.15 s dead time with
+its 200 ms start boost, the piston in 3 s from half way, the plunger in 8 s; a
+skill that waits for an end switch succeeds at once when it is already there,
+open-loop skills run exactly their duration. The scale has no hardware, so the
+module reads a constant 2.0 g, which `Tare` does not change. It is a development
+and test aid, not a
 controller: it has no start conditions, no stop sequences except the ones in the
 documents, and no safety functions.

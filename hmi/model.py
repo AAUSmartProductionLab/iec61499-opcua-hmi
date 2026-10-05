@@ -1,36 +1,37 @@
 """State machines, error codes and command rules shared by all modules.
 
 Everything in here is pure data or pure functions over the OPC UA values so it
-can be unit tested without a controller.
+can be unit tested without a controller. The numbers come from modlink.codes.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from modlink.codes import (
+    ERROR_NAMES,
+    MODULE_COMMANDS,  # noqa: F401  (re-exported)
+    MODULE_STATE_NAMES,
+    SKILL_COMMANDS,  # noqa: F401  (re-exported)
+    SKILL_STATE_NAMES,
+    ErrorId,
+    ModuleState,
+    SkillState,
+)
+
 # --- PackML module states -------------------------------------------------
 
-STOPPED = 2
-STARTING = 3
-IDLE = 4
-EXECUTE = 6
-STOPPING = 7
-ABORTING = 8
-ABORTED = 9
-CLEARING = 1
-RESETTING = 15
+CLEARING = int(ModuleState.CLEARING)
+STOPPED = int(ModuleState.STOPPED)
+STARTING = int(ModuleState.STARTING)
+IDLE = int(ModuleState.IDLE)
+EXECUTE = int(ModuleState.EXECUTE)
+STOPPING = int(ModuleState.STOPPING)
+ABORTING = int(ModuleState.ABORTING)
+ABORTED = int(ModuleState.ABORTED)
+RESETTING = int(ModuleState.RESETTING)
 
-MODULE_STATES: dict[int, str] = {
-    CLEARING: "Clearing",
-    STOPPED: "Stopped",
-    STARTING: "Starting",
-    IDLE: "Idle",
-    EXECUTE: "Execute",
-    STOPPING: "Stopping",
-    ABORTING: "Aborting",
-    ABORTED: "Aborted",
-    RESETTING: "Resetting",
-}
+MODULE_STATES: dict[int, str] = dict(MODULE_STATE_NAMES)
 
 MODULE_STATE_KIND: dict[int, str] = {
     CLEARING: "acts",
@@ -46,21 +47,14 @@ MODULE_STATE_KIND: dict[int, str] = {
 
 # --- Skill states --------------------------------------------------------
 
-SK_IDLE = 0
-SK_RUNNING = 1
-SK_STOPPING = 2
-SK_SUCCEEDED = 3
-SK_FAILED = 4
-SK_ABORTED = 5
+SK_IDLE = int(SkillState.IDLE)
+SK_RUNNING = int(SkillState.RUNNING)
+SK_STOPPING = int(SkillState.STOPPING)
+SK_SUCCEEDED = int(SkillState.SUCCEEDED)
+SK_FAILED = int(SkillState.FAILED)
+SK_ABORTED = int(SkillState.ABORTED)
 
-SKILL_STATES: dict[int, str] = {
-    SK_IDLE: "Idle",
-    SK_RUNNING: "Running",
-    SK_STOPPING: "Stopping",
-    SK_SUCCEEDED: "Succeeded",
-    SK_FAILED: "Failed",
-    SK_ABORTED: "Aborted",
-}
+SKILL_STATES: dict[int, str] = dict(SKILL_STATE_NAMES)
 
 SKILL_STATES_CSS: dict[int, str] = {
     SK_IDLE: "idle",
@@ -82,27 +76,17 @@ SKILL_STATE_KIND: dict[int, str] = {
 
 # --- Error codes ---------------------------------------------------------
 
-ERR_NONE = 0
-ERR_PRECONDITION = 1
-ERR_INVARIANT = 2
-ERR_TIMEOUT = 3
-ERR_NOT_READY = 4
-ERR_NOT_PERMITTED = 5
-ERR_BUSY = 6
-ERR_INTERRUPTED = 7
-ERR_OUT_OF_RANGE = 8
+ERR_NONE = int(ErrorId.NONE)
+ERR_PRECONDITION = int(ErrorId.PRECONDITION_VIOLATED)
+ERR_INVARIANT = int(ErrorId.INVARIANT_VIOLATED)
+ERR_TIMEOUT = int(ErrorId.TIMEOUT)
+ERR_NOT_READY = int(ErrorId.NOT_READY)
+ERR_NOT_PERMITTED = int(ErrorId.NOT_PERMITTED)
+ERR_BUSY = int(ErrorId.BUSY)
+ERR_INTERRUPTED = int(ErrorId.INTERRUPTED)
+ERR_OUT_OF_RANGE = int(ErrorId.OUT_OF_RANGE)
 
-ERROR_CODES: dict[int, str] = {
-    ERR_NONE: "None",
-    ERR_PRECONDITION: "PreconditionViolated",
-    ERR_INVARIANT: "InvariantViolated",
-    ERR_TIMEOUT: "Timeout",
-    ERR_NOT_READY: "NotReady",
-    ERR_NOT_PERMITTED: "NotPermitted",
-    ERR_BUSY: "Busy",
-    ERR_INTERRUPTED: "Interrupted",
-    ERR_OUT_OF_RANGE: "OutOfRange",
-}
+ERROR_CODES: dict[int, str] = dict(ERROR_NAMES)
 
 ERROR_TEXT: dict[int, str] = {
     ERR_NONE: "No error",
@@ -147,8 +131,6 @@ def skill_state_name(value: Any) -> str:
 
 # --- Commands ------------------------------------------------------------
 
-MODULE_COMMANDS: tuple[str, ...] = ("Reset", "Start", "Stop", "Abort", "Clear")
-SKILL_COMMANDS: tuple[str, ...] = ("Start", "Stop", "Abort", "Reset")
 
 MODULE_COMMAND_FROM_STATES: dict[str, frozenset[int]] = {
     "Reset": frozenset({STOPPED}),

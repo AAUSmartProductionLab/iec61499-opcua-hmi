@@ -523,19 +523,49 @@ function renderLog(entries) {
   if (atEnd) box.scrollTop = box.scrollHeight;
 }
 
+function showSnapshot(snapshot) {
+  for (const [key, module] of Object.entries(snapshot.modules)) {
+    const ui = state.ui[key];
+    if (ui) updateModule(ui, module);
+  }
+  renderLog(snapshot.log);
+}
+
 async function poll() {
+  // Only while the push channel is down, and one loop at a time.
+  if (state.socketOpen || state.polling) return;
+  state.polling = true;
   try {
-    const snapshot = await api(`/api/snapshot?session=${encodeURIComponent(sessionId())}`);
-    for (const [key, module] of Object.entries(snapshot.modules)) {
-      const ui = state.ui[key];
-      if (ui) updateModule(ui, module);
-    }
-    renderLog(snapshot.log);
+    showSnapshot(await api(`/api/snapshot?session=${encodeURIComponent(sessionId())}`));
   } catch (error) {
     if (!String(error.message).includes('missing session')) toast(error.message, true);
   } finally {
-    setTimeout(poll, 250);
+    state.polling = false;
+    if (!state.socketOpen) setTimeout(poll, 250);
   }
+}
+
+function listen() {
+  // The service pushes a snapshot whenever something changes; polling covers the gaps.
+  const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const url = `${scheme}://${window.location.host}/ws?session=${encodeURIComponent(sessionId())}`;
+  let socket;
+  try {
+    socket = new WebSocket(url);
+  } catch (error) {
+    setTimeout(listen, 2000);
+    return;
+  }
+  socket.addEventListener('open', () => { state.socketOpen = true; });
+  socket.addEventListener('message', (event) => {
+    try { showSnapshot(JSON.parse(event.data)); } catch (error) { console.error(error); }
+  });
+  socket.addEventListener('close', () => {
+    const wasOpen = state.socketOpen;
+    state.socketOpen = false;
+    if (wasOpen) poll();
+    setTimeout(listen, 2000);
+  });
 }
 
 async function boot() {
@@ -556,6 +586,7 @@ async function boot() {
     document.getElementById('log').textContent = '';
   });
   poll();
+  listen();
 }
 
 boot().catch((error) => toast(error.message, true));

@@ -9,6 +9,7 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from hmi import model
 from hmi import profiles as prof
@@ -277,6 +278,28 @@ def test_values_arrive_through_the_subscription(client):
     assert module["skills"]["Dispensing"]["steps"][0]["name"] == "MoveNeedleDown"
     assert module["skills"]["Dispensing"]["stopSteps"][0]["name"] == "MoveNeedleUp"
     assert view(client, "stoppering")["procedures"]["Resetting"]["steps"][0]["name"] == "ArmMiddle"
+
+
+def test_snapshots_are_pushed_over_the_websocket(client):
+    with client.websocket_connect(f"/ws?session={SESSION}") as socket:
+        first = socket.receive_json()
+        assert set(first["modules"]) == {"filling", "stoppering"}
+        assert first["session"] == SESSION
+        occupy(client, "stoppering")
+        for _ in range(50):
+            pushed = socket.receive_json()
+            if pushed["modules"]["stoppering"]["occupier"]:
+                break
+        else:
+            raise AssertionError("no snapshot showed the occupation")
+        assert pushed["log"][-1]["text"] in ("module occupied", "Occupation/Occupy: accepted")
+
+
+def test_a_websocket_without_session_is_closed(client):
+    with pytest.raises(WebSocketDisconnect) as closed:
+        with client.websocket_connect("/ws") as socket:
+            socket.receive_json()
+    assert closed.value.code == 1008
 
 
 def test_commands_are_refused_without_the_occupation(client):

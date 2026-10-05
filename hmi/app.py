@@ -1,4 +1,4 @@
-"""FastAPI application: JSON API and the single page HMI.
+"""FastAPI application: JSON API, a WebSocket that pushes snapshots, and the single page HMI.
 
 The service runs on the application's event loop; the lifespan starts and
 stops it unless the caller manages it (``manage=False``).
@@ -6,12 +6,13 @@ stops it unless the caller manages it (``manage=False``).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -24,6 +25,9 @@ LOGGER = logging.getLogger(__name__)
 HERE = Path(__file__).resolve().parent
 SESSION_HEADER = "X-Session-Id"
 MAX_LOG_LIMIT = 200
+# A page gets a snapshot at most this often, and at least this often when nothing changes.
+PUSH_INTERVAL = 0.1
+PUSH_IDLE = 2.0
 
 
 class ApiError(Exception):
@@ -133,6 +137,27 @@ def create_app(service: HmiService, manage: bool = True) -> FastAPI:
     @app.get("/api/log")
     async def api_log(request: Request) -> dict[str, Any]:
         return {"entries": service.log_entries(limit(request, "limit"))}
+
+    @app.websocket("/ws")
+    async def push(socket: WebSocket) -> None:
+        """Pushes the snapshot of this session whenever something has changed."""
+        try:
+            session = check_session(socket.query_params.get("session"))
+        except ApiError as error:
+            await socket.close(code=1008, reason=error.message)
+            return
+        await socket.accept()
+        version = -1
+        try:
+            while True:
+                version = service.version
+                snapshot = service.snapshot(session)
+                snapshot["log"] = service.log_entries(60)
+                await socket.send_json(snapshot)
+                await asyncio.sleep(PUSH_INTERVAL)
+                await service.changed(version, PUSH_IDLE)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
 
     @app.exception_handler(ApiError)
     async def handle_api_error(_: Request, error: ApiError) -> JSONResponse:

@@ -18,7 +18,10 @@ Both modules described in the specification documents are supported:
 ```bash
 pip install -r requirements.txt
 
-# against the real controller
+# the modules registered on an AAS server (Eclipse BaSyx), each at the endpoint its AAS names
+python run.py --aas http://<aas-server>:8081
+
+# against the real controller, with the built-in descriptions
 python run.py --modules filling --endpoint filling=opc.tcp://192.168.0.191:4840
 python run.py --modules stoppering --endpoint stoppering=opc.tcp://<second-pi>:4840
 python run.py --modules filling,stoppering --endpoint filling=opc.tcp://192.168.0.191:4840
@@ -35,7 +38,8 @@ simulator port is taken.
 
 | Option | Meaning |
 | --- | --- |
-| `--modules filling,stoppering` | which modules to show |
+| `--aas URL\|FILE` | describe the modules by their AAS: an AAS repository (`http...`, part 2 API) or an AAS environment file (`.json`, `.json.gz`) |
+| `--modules filling,stoppering` | which modules to show (default: both built-in ones, or every module the AAS describe) |
 | `--endpoint KEY=URL` | endpoint of a module, repeatable |
 | `--simulate [KEYS]` | run the simulator for these modules (all when omitted) |
 | `--sim-endpoint URL` | endpoint the simulated modules serve on |
@@ -49,17 +53,58 @@ The module endpoints default to the ones from the specification documents
 (`opc.tcp://192.168.0.191:4840` for Filling, `opc.tcp://localhost:4841` for the
 simulated Stoppering module).
 
+## Modules from their AAS
+
+A module registers its AAS (iec61499-mgmt-py: `modsync pull --register` sends its profile to
+`modreg serve`, which builds the AAS, checks it against the resource ontology and publishes it to
+the AAS server). The AAS holds everything the HMI shows, so `--aas` builds the module
+descriptions from it (`hmi/aas.py`) instead of taking the built-in ones (`hmi/profiles.py`):
+
+| HMI | From the AAS |
+| --- | --- |
+| root object, endpoint, every node | Asset Interfaces Description: the OPC UA base and the browse path of every action and property |
+| skills: kind, description, parameters (unit, range, default), results (unit), occupied equipment | Skills submodel: each skill with its Parameters, Contract, Occupies; result properties of the interface |
+| steps of Execute and Stop, with the constants bound to them | the skill's sequences: each step's skill, instance, bindings and State reference |
+| procedures Resetting and Stopping | Skills/Procedures |
+| sensors, equipment notes | Hierarchical Structures (the equipment) and its properties in the interface |
+
+Only shells with a Skills submodel and an OPC UA interface are modules; nothing but plain JSON
+is read, so no AAS library is needed. `tests/test_aas.py` checks that the AAS of both modules
+(`tests/data`, written by `tools/aas_fixtures.py`) give the same descriptions as the built-in
+ones, and runs the simulator and the HMI on a module taken from its AAS.
+
+### The whole flow, with FORTE and BaSyx
+
+`tests/test_end_to_end.py` runs everything for real: 4diac FORTE with the filling module on its
+Modbus simulator, `modsync pull --register` into `modreg serve`, Eclipse BaSyx as AAS server,
+and the HMI built from BaSyx running Dispensing on FORTE. It is skipped unless the parts are there:
+
+```bash
+tools/forte/build.sh ../forte-build        # FORTE 3.3.0 for Linux with every module (no FBE needed)
+# BaSyx AAS environment as a plain jar (Maven Central), no Docker needed:
+curl -LO https://repo1.maven.org/maven2/org/eclipse/digitaltwin/basyx/basyx.aasenvironment.component/2.0.0-milestone-15/basyx.aasenvironment.component-2.0.0-milestone-15-exec.jar
+FORTE_BIN=../forte-build/build-forte/forte/forte \
+BASYX_JAR=basyx.aasenvironment.component-2.0.0-milestone-15-exec.jar python -m pytest tests/test_end_to_end.py
+```
+
+`tools/forte/build.sh` does on Linux what iec61499-mgmt-py's `runtime/build-modules.ps1` and
+`build-runtime.ps1` do on Windows with the FBE: the 4diac IDE 3.3.0 exports the types of ModLib
+and of every module headlessly (under Xvfb), open62541 1.5.4 is built single threaded, and FORTE
+3.3.0 with the repository's patches is built with OPC UA, Modbus, IO, GPIO and PWM.
+
 ## How it works
 
 ```
 run.py                 command line entry point: simulator, links and web server on one event loop
 modlink/               async OPC UA access to the modules, for the HMI and for agents (below)
-hmi/profiles.py        declarative address space of each module (single source of truth)
+hmi/profiles.py        declarative address space of each module (built in, or from the AAS)
+hmi/aas.py             the module descriptions from the modules' AAS (file or AAS repository)
 hmi/model.py           PackML states, skill states, error codes, button rules, diagrams
 hmi/service.py         occupation, command results, message log, snapshot for the page
 hmi/app.py             FastAPI routes and the WebSocket that pushes snapshots
 hmi/static             the HMI page: diagram.js (state machine drawings), hmi.js, hmi.css
 sim/fake_module.py     simulated controller built from the same profiles
+tools/                 AAS test data from iec61499-mgmt-py; FORTE for Linux (tools/forte)
 tests/                 unit tests and end to end tests against the simulator
 ```
 

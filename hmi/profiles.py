@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from modlink import Interface
+
 from .model import MODULE_COMMANDS, SKILL_COMMANDS
 
 NAMESPACE_INDEX = 1
@@ -452,3 +454,8 @@ def browse_path(path: str, namespace: int = NAMESPACE_INDEX) -> list[str]:
 
 def root_browse_path(profile: ModuleProfile) -> list[str]:
     return [f"0:{NODES_FOLDER}", f"{NAMESPACE_INDEX}:{profile.root}"]
+
+def interface(profile: ModuleProfile) -> Interface:
+    """The module's address space as the OPC UA client (modlink) needs it."""
+    return Interface.of(profile.root, monitored_paths(profile), method_paths(profile),
+                        namespace=NAMESPACE_INDEX, endpoint=profile.default_endpoint)

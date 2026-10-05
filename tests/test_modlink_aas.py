@@ -5,12 +5,18 @@ The AAS in tests/data are what iec61499-mgmt-py's modreg registers (tools/aas_fi
 
 from __future__ import annotations
 
+import asyncio
+import copy
 from pathlib import Path
 
 import pytest
 
+from hmi import aas as hmi_aas
 from hmi import profiles as prof
-from modlink import aas
+from modlink import Link, Module, SkillState, aas
+from modlink.module import Paths
+
+from test_integration import Simulator
 
 DATA = Path(__file__).resolve().parent / "data"
 FILLING = DATA / "FillingModuleAAS.json.gz"
@@ -65,3 +71,44 @@ def test_capabilities_lead_to_the_skill_that_realizes_them(filling, stoppering):
     assert stoppering.realizing("Stoppering").name == "Stoppering"
     with pytest.raises(KeyError):
         filling.capability("Capping")
+
+
+def test_paths_follow_the_references_not_the_names():
+    """Point Dispensing's Start at Tare's action: the client calls what the AAS says."""
+    env = aas.read_file(FILLING)
+    skills = next(s for s in env["submodels"] if s["idShort"] == "Skills")
+    dispensing = aas.at(skills, "Skills", "Dispensing")
+    tare_start = copy.deepcopy(aas.value(aas.at(aas.at(skills, "Skills", "Tare"), "Methods", "Start")))
+    aas.at(dispensing, "Methods", "Start")["value"] = tare_start
+    [resource] = [aas.describe(e) for e in aas.environments(env) if e.is_module]
+    assert Paths(resource).skill_command("Dispensing", "Start") == "Skills/Tare/Start"
+    assert Paths().skill_command("Dispensing", "Start") == "Skills/Dispensing/Start"     # by convention
+    broken = aas.read_file(FILLING)
+    skills = next(s for s in broken["submodels"] if s["idShort"] == "Skills")
+    aas.at(skills, "Skills", "Dispensing", "StateReference")["value"]["keys"][-1]["value"] = "Nowhere"
+    with pytest.raises(aas.AasError, match="Dispensing's state"):
+        [aas.describe(e) for e in aas.environments(broken) if e.is_module]
+
+
+def test_an_agent_runs_a_capability_of_a_module_described_by_its_aas(filling):
+    """The simulated module serves the address space its AAS describes."""
+    [profile] = hmi_aas.load(str(FILLING))
+    simulator = Simulator(["filling"], profiles=[profile])
+    simulator.start()
+
+    async def scenario():
+        async with Link(simulator.endpoint, [filling.interface], sampling_ms=100) as link:
+            assert await link.wait_connected(20)
+            module = Module(link, filling.root, session="agent", resource=filling)
+            await module.occupy()
+            await module.bring_to_execute()
+            run = await module.run_capability("Filling", timeout=30)
+            assert run.skill == "Dispensing" and run.state == SkillState.SUCCEEDED
+            assert run.results["Weight"] > 0
+            await module.command("Stop")
+            await module.release()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        simulator.stop()

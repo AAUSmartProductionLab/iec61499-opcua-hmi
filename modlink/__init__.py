@@ -5,7 +5,7 @@
 - ``Link``: one supervised connection per endpoint (resolve, subscribe, call,
   reconnect), asyncio only;
 - ``Module``: one module for one occupation session (occupy, commands, run a
-  skill and wait for its end);
+  skill or an offered capability and wait for its end);
 - ``aas``: a module's AAS read into a ``Resource``: its capabilities, skills
   and their browse paths, by following the references of the AAS;
 - ``codes``: module states, skill states and ErrorIDs.

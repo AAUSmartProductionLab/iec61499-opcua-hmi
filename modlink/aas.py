@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .interface import Interface
+from .link import Link
 
 BROWSE_PATH = re.compile(r"^/?0:Objects/(\d+):([^/]+)/(.+)$")
 CAPABILITY_DESCRIPTION = "https://admin-shell.io/idta/SubmodelTemplate/CapabilityDescription/1/0"
@@ -284,6 +285,10 @@ class Resource:
     def realizing(self, meaning: str) -> SkillLink:
         """The skill that realizes a capability."""
         return self.skills[self.capability(meaning).skill]
+
+    def connect(self, **options: Any) -> Link:
+        """A link to the module's endpoint for its interface (start it, or use ``async with``)."""
+        return Link(self.endpoint, [self.interface], **options)
 
 
 def describe(env: Environment) -> Resource:

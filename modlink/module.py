@@ -1,14 +1,18 @@
-"""A module as a client uses it: occupy, command the module, run skills.
+"""A module as a client uses it: occupy, command the module, run skills and capabilities.
 
 ``Module`` wraps one module on a ``Link`` for one occupation session, so an
-agent (or a test) can drive a module without knowing the address space:
+agent (or a test) can drive a module without knowing the address space. Given
+the module's ``Resource`` (its AAS, ``modlink.aas``), every browse path comes
+from the references of the AAS; without it the module's naming conventions are
+used (``Skills/<Skill>/Start`` ...):
 
-    async with Link(endpoint, [interface]) as link:
+    [filling] = modlink.aas.load("http://aas-server:8081")
+    async with filling.connect() as link:
         await link.wait_connected(10)
-        filling = Module(link, "Filling", session="agent-1")
-        await filling.occupy()
-        await filling.bring_to_execute()
-        run = await filling.run("Dispensing", 1.0)
+        module = Module(link, filling.root, session="agent-1", resource=filling)
+        await module.occupy()
+        await module.bring_to_execute()
+        run = await module.run_capability("Filling")
         print(run.state, run.results)
 """
 
@@ -18,6 +22,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
+from .aas import Resource
 from .codes import MODULE_COMMANDS, SKILL_COMMANDS, SKILL_ENDS, ModuleState, SkillState, as_int
 from .link import Answer, Change, Link
 
@@ -47,11 +52,43 @@ class Run:
         return self.state == SkillState.SUCCEEDED
 
 
+class Paths:
+    """Where a module's methods and variables are, below its root object."""
+
+    def __init__(self, resource: Resource | None = None) -> None:
+        self.resource = resource
+
+    def occupation(self, name: str) -> str:            # Occupy, Release, Occupied
+        found = self.resource.occupation.get(name) if self.resource else None
+        return found or f"Occupation/{name}"
+
+    def module_command(self, command: str) -> str:
+        found = self.resource.module_commands.get(command) if self.resource else None
+        return found or f"Module/{command}"
+
+    def module_state(self) -> str:
+        return (self.resource.module_state if self.resource else "") or "Module/State"
+
+    def skill_command(self, skill: str, command: str) -> str:
+        link = self.resource.skills.get(skill) if self.resource else None
+        if self.resource and link is None:
+            raise KeyError(f"{self.resource.id_short} has no skill {skill}")
+        return link.commands[command] if link else f"Skills/{skill}/{command}"
+
+    def skill_state(self, skill: str) -> str:
+        return self.resource.skills[skill].state if self.resource else f"Skills/{skill}/State"
+
+    def skill_error(self, skill: str) -> str:
+        return (self.resource.skills[skill].error if self.resource else "") or f"Skills/{skill}/ErrorID"
+
+
 class Module:
-    def __init__(self, link: Link, root: str, session: str) -> None:
+    def __init__(self, link: Link, root: str, session: str, resource: Resource | None = None) -> None:
         self.link = link
         self.root = root
         self.session = session
+        self.resource = resource
+        self.paths = Paths(resource)
         self.interface = link.module(root).interface
 
     # --- what it shows ---------------------------------------------------
@@ -61,16 +98,18 @@ class Module:
 
     @property
     def state(self) -> int:
-        return as_int(self.value("Module/State"))
+        return as_int(self.value(self.paths.module_state()))
 
     @property
     def occupied(self) -> bool:
-        return bool(self.value("Occupation/Occupied"))
+        return bool(self.value(self.paths.occupation("Occupied")))
 
     def skill_state(self, skill: str) -> int:
-        return as_int(self.value(f"Skills/{skill}/State"))
+        return as_int(self.value(self.paths.skill_state(skill)))
 
     def results(self, skill: str) -> dict[str, Any]:
+        if self.resource:
+            return {name: self.value(path) for name, path in self.resource.skills[skill].results.items()}
         prefix = f"Skills/{skill}/Results/"
         return {path[len(prefix):]: self.value(path) for path in self.interface.variables if path.startswith(prefix)}
 
@@ -83,27 +122,28 @@ class Module:
         return answer
 
     async def occupy(self, check: bool = True) -> Answer:
-        return await self.call("Occupation/Occupy", check=check)
+        return await self.call(self.paths.occupation("Occupy"), check=check)
 
     async def release(self, check: bool = True) -> Answer:
-        return await self.call("Occupation/Release", check=check)
+        return await self.call(self.paths.occupation("Release"), check=check)
 
     async def command(self, command: str, check: bool = True) -> Answer:
         if command not in MODULE_COMMANDS:
             raise ValueError(f"unknown module command '{command}'")
-        return await self.call(f"Module/{command}", check=check)
+        return await self.call(self.paths.module_command(command), check=check)
 
     async def skill(self, skill: str, command: str, *params: float, check: bool = True) -> Answer:
         if command not in SKILL_COMMANDS:
             raise ValueError(f"unknown skill command '{command}'")
         args = [float(p) for p in params] if command == "Start" else []
-        return await self.call(f"Skills/{skill}/{command}", *args, check=check)
+        return await self.call(self.paths.skill_command(skill, command), *args, check=check)
 
     # --- waiting ---------------------------------------------------------
 
     async def wait_state(self, *states: int, timeout: float | None = 60.0) -> int:
         wanted = {int(s) for s in states}
-        return as_int(await self.link.wait_for(self.root, "Module/State", lambda v: as_int(v) in wanted, timeout))
+        return as_int(await self.link.wait_for(self.root, self.paths.module_state(), lambda v: as_int(v) in wanted,
+                                               timeout))
 
     async def bring_to_execute(self, timeout: float = 120.0) -> None:
         """Clear, reset and start the module, from wherever it is, to Execute."""
@@ -117,7 +157,7 @@ class Module:
                 return
             command = {ModuleState.ABORTED: "Clear", ModuleState.STOPPED: "Reset", ModuleState.IDLE: "Start"}[state]
             await self.command(command)
-            await self.link.wait_for(self.root, "Module/State", lambda v, s=state: as_int(v) != s, timeout)
+            await self.link.wait_for(self.root, self.paths.module_state(), lambda v, s=state: as_int(v) != s, timeout)
         if self.state != ModuleState.EXECUTE:
             raise RuntimeError(f"{self.root} did not reach Execute (state {self.state})")
 
@@ -127,7 +167,7 @@ class Module:
         The end is taken from the first terminal state notified after the start,
         so a Succeeded left over from the previous run does not count.
         """
-        path = f"Skills/{skill}/State"
+        path = self.paths.skill_state(skill)
         ended: asyncio.Future = asyncio.get_running_loop().create_future()
         started = False
 
@@ -148,9 +188,18 @@ class Module:
             remove()
         return await self._ended(skill, state)
 
+    async def run_capability(self, capability: str, values: dict[str, float] | None = None,
+                             timeout: float | None = 120.0) -> Run:
+        """Run the skill that realizes an offered capability (by name or meaning), with the given
+        parameter values and the skill's defaults for the rest. Needs the module's Resource."""
+        if self.resource is None:
+            raise RuntimeError("running a capability needs the module's AAS (resource=...)")
+        skill = self.resource.realizing(capability)
+        return await self.run(skill.name, *skill.arguments(values), timeout=timeout)
+
     async def wait_skill_end(self, skill: str, timeout: float | None = 120.0) -> Run:
         """Wait until a skill that runs now has ended (at once if it is in an end state)."""
-        state = as_int(await self.link.wait_for(self.root, f"Skills/{skill}/State",
+        state = as_int(await self.link.wait_for(self.root, self.paths.skill_state(skill),
                                                 lambda v: as_int(v) in SKILL_ENDS, timeout))
         return await self._ended(skill, state)
 
@@ -159,8 +208,8 @@ class Module:
         if state != SkillState.SUCCEEDED:
             # The ErrorID may be notified just after the state.
             try:
-                error_id = as_int(await self.link.wait_for(self.root, f"Skills/{skill}/ErrorID",
+                error_id = as_int(await self.link.wait_for(self.root, self.paths.skill_error(skill),
                                                            lambda v: as_int(v, 0) > 0, ERROR_WAIT), 0)
             except asyncio.TimeoutError:
-                error_id = as_int(self.value(f"Skills/{skill}/ErrorID"), 0)
+                error_id = as_int(self.value(self.paths.skill_error(skill)), 0)
         return Run(skill, state, error_id, self.results(skill))

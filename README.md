@@ -67,6 +67,7 @@ descriptions from it (`hmi/aas.py`) instead of taking the built-in ones (`hmi/pr
 | steps of Execute and Stop, with the constants bound to them | the skill's sequences: each step's skill, instance, bindings and State reference |
 | procedures Resetting and Stopping | Skills/Procedures |
 | sensors, equipment notes | Hierarchical Structures (the equipment) and its properties in the interface |
+| (agents) offered capabilities and the skill realizing each | Capability Description (IDTA 02020), `CapabilityRealizedBy` referring to the skill |
 
 Only shells with a Skills submodel and an OPC UA interface are modules; nothing but plain JSON
 is read, so no AAS library is needed. `tests/test_aas.py` checks that the AAS of both modules
@@ -77,7 +78,8 @@ ones, and runs the simulator and the HMI on a module taken from its AAS.
 
 `tests/test_end_to_end.py` runs everything for real: 4diac FORTE with the filling module on its
 Modbus simulator, `modsync pull --register` into `modreg serve`, Eclipse BaSyx as AAS server,
-and the HMI built from BaSyx running Dispensing on FORTE. It is skipped unless the parts are there:
+the HMI built from BaSyx running Dispensing on FORTE, and an agent running the module's Filling
+capability through the references of the AAS. It is skipped unless the parts are there:
 
 ```bash
 tools/forte/build.sh ../forte-build        # FORTE 3.3.0 for Linux with every module (no FBE needed)
@@ -182,32 +184,35 @@ tests/                 unit tests and end to end tests against the simulator
 ## modlink: the modules for agents
 
 `modlink` is the OPC UA side of the HMI on its own, asyncio only and without
-anything of the web app, so an agent (or a script) drives a module the same way:
+anything of the web app, so an agent (or a script) drives a module the same way.
+Given the module's AAS it needs no knowledge of the address space: it follows
+the references of the AAS from an offered capability to the skill realizing it
+and on to the browse paths that skill's commands and properties are at.
 
 ```python
 import asyncio
-from modlink import Link, Module, discover
+from modlink import Module, aas
 
 async def main():
-    endpoint = "opc.tcp://192.168.0.191:4840"
-    interface = await discover(endpoint, "Filling")      # or hmi.profiles.interface(...)
-    async with Link(endpoint, [interface]) as link:
+    [filling] = aas.load("http://<aas-server>:8081")      # or an AAS environment file
+    async with filling.connect() as link:                  # the endpoint the AAS names
         await link.wait_connected(10)
-        filling = Module(link, "Filling", session="agent-1")
-        await filling.occupy()
-        await filling.bring_to_execute()
-        run = await filling.run("Dispensing", timeout=60)
-        print(run.state, run.error_id, run.results)   # 3 (Succeeded), 0, {'Weight': ...}
-        await filling.release()
+        module = Module(link, filling.root, session="agent-1", resource=filling)
+        await module.occupy()
+        await module.bring_to_execute()
+        run = await module.run_capability("Filling")       # realized by Dispensing
+        print(run.skill, run.state, run.error_id, run.results)
+        await module.release()
 
 asyncio.run(main())
 ```
 
 | Part | What it does |
 | --- | --- |
+| `aas` | reads a module's AAS into a `Resource`: offered capabilities with their values and ranges and the skill realizing each (`CapabilityRealizedBy`), every skill with the browse paths of its commands (`Methods`), state, ErrorID and results and its parameters in call order (unit, range, default), the module's commands, state and occupation, and the `Interface` of the module |
 | `Interface` | the variables and methods of one module by browse path; `discover` browses them from the server |
 | `Link` | one supervised connection per endpoint: resolve, one subscription, calls on the parent object, probe when quiet, reconnect with back-off; listeners and `changes()` for every value change |
-| `Module` | one module for one occupation session: `occupy`, `command`, `skill`, `run` (start and wait for the end), `wait_state` |
+| `Module` | one module for one occupation session: `occupy`, `command`, `skill`, `run` (start and wait for the end), `run_capability`, `wait_state`; browse paths from the `Resource`, else by the module's naming conventions |
 | `codes` | `ModuleState`, `SkillState`, `ErrorId` as in the controller's ModLib |
 
 ## API

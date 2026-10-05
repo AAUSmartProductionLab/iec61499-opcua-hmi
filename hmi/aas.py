@@ -8,58 +8,23 @@ HMI needs, so a ``ModuleProfile`` is built from it instead of being written by h
 
 Sources: an AAS environment file (``.json`` or ``.json.gz``) or an AAS repository with the HTTP
 API of the AAS specification part 2 (BaSyx), whose shells are read with their submodels. Only
-shells with a Skills submodel and an OPC UA interface are modules.
-
-Plain JSON in, plain dataclasses out: no AAS library is needed.
+shells with a Skills submodel and an OPC UA interface are modules. Reading the AAS is modlink's
+(``modlink.aas``), which the HMI's agents and services share.
 """
 
 from __future__ import annotations
 
-import base64
-import gzip
-import json
 import re
-import urllib.parse
-import urllib.request
-from pathlib import Path
 from typing import Any, Iterable, Iterator
+
+from modlink.aas import (  # noqa: F401  (re-exported for the HMI's callers)
+    AasError, Environment, Repository, at, b64, child, children, environments, read, read_file, value,
+)
 
 from .profiles import ModuleProfile, Param, Procedure, Sensor, Skill, Step
 
 OCCUPATION_SKILLS = ("Occupy", "Release")
 ROOT_PATH = re.compile(r"^/?0:Objects/(\d+):([^/]+)/")
-
-
-class AasError(ValueError):
-    """The AAS does not describe a module the HMI can show."""
-
-
-# --- reading an AAS environment -----------------------------------------------------------------
-
-def children(element: dict) -> list[dict]:
-    """The elements below a submodel, a collection or list (``value``) or an entity (``statements``)."""
-    member = next((m for m in ("submodelElements", "statements") if m in element), "value")
-    held = element.get(member)
-    return [c for c in held if isinstance(c, dict) and "modelType" in c] if isinstance(held, list) else []
-
-
-def child(element: dict, id_short: str) -> dict | None:
-    return next((c for c in children(element) if c.get("idShort") == id_short), None)
-
-
-def at(element: dict | None, *path: str) -> dict | None:
-    for step in path:
-        if element is None:
-            return None
-        element = child(element, step)
-    return element
-
-
-def value(element: dict | None, default: Any = None) -> Any:
-    if element is None:
-        return default
-    found = element.get("value", default)
-    return default if found is None else found
 
 
 def text(element: dict | None) -> str:
@@ -93,44 +58,6 @@ def number(raw: Any, default: float = 0.0) -> float:
         return float(raw)
     except (TypeError, ValueError):
         return default
-
-
-class Environment:
-    """One module's shell and submodels."""
-
-    def __init__(self, shell: dict, submodels: Iterable[dict]) -> None:
-        self.shell = shell
-        self.submodels = {s["id"]: s for s in submodels}
-        self.by_name = {s.get("idShort"): s for s in self.submodels.values()}
-
-    def submodel(self, id_short: str) -> dict | None:
-        return self.by_name.get(id_short)
-
-    def resolve(self, reference: dict | None) -> dict | None:
-        keys = (reference or {}).get("keys") or []
-        if not keys or keys[0].get("type") != "Submodel":
-            return None
-        node = self.submodels.get(keys[0]["value"])
-        for key in keys[1:]:
-            node = child(node, key["value"]) if node is not None else None
-        return node
-
-    @property
-    def is_module(self) -> bool:
-        return self.submodel("Skills") is not None and self.interface() is not None
-
-    def interface(self) -> dict | None:
-        return at(self.submodel("AssetInterfacesDescription"), "interface_opcua")
-
-
-def environments(env: dict) -> list[Environment]:
-    """The shells of an AAS environment, each with the submodels it refers to."""
-    submodels = env.get("submodels", [])
-    found = []
-    for shell in env.get("assetAdministrationShells", []):
-        ids = {last for ref in shell.get("submodels", []) if (last := (ref.get("keys") or [{}])[0].get("value"))}
-        found.append(Environment(shell, [s for s in submodels if s.get("id") in ids]))
-    return found
 
 
 # --- the module ------------------------------------------------------------------------------------
@@ -296,55 +223,9 @@ def describe(skill: dict) -> str:
 
 # --- sources ---------------------------------------------------------------------------------------
 
-def b64(identifier: str) -> str:
-    """An identifier as the AAS HTTP API takes it in a path (base64url without padding)."""
-    return base64.urlsafe_b64encode(identifier.encode()).decode().rstrip("=")
-
-
-def read_file(path: str | Path) -> dict:
-    path = Path(path)
-    raw = gzip.decompress(path.read_bytes()) if path.suffix == ".gz" else path.read_bytes()
-    return json.loads(raw)
-
-
-class Repository:
-    """An AAS repository (part 2 HTTP API): shells and submodels by base64url id."""
-
-    def __init__(self, url: str, timeout: float = 10.0) -> None:
-        self.url = url.rstrip("/")
-        self.timeout = timeout
-
-    def get(self, path: str, query: dict | None = None) -> Any:
-        url = f"{self.url}/{path}" + (f"?{urllib.parse.urlencode(query)}" if query else "")
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "application/json"}),
-                                    timeout=self.timeout) as response:
-            return json.loads(response.read())
-
-    def shells(self) -> list[dict]:
-        found, cursor = [], None
-        while True:
-            page = self.get("shells", {"limit": 100, **({"cursor": cursor} if cursor else {})})
-            found += page.get("result", page if isinstance(page, list) else [])
-            cursor = (page.get("paging_metadata") or {}).get("cursor") if isinstance(page, dict) else None
-            if not cursor:
-                return found
-
-    def environment(self) -> dict:
-        shells = self.shells()
-        ids = dict.fromkeys(ref["keys"][0]["value"] for shell in shells for ref in shell.get("submodels", [])
-                            if ref.get("keys"))
-        submodels = []
-        for identifier in ids:
-            try:
-                submodels.append(self.get(f"submodels/{b64(identifier)}"))
-            except OSError:
-                continue
-        return {"assetAdministrationShells": shells, "submodels": submodels}
-
-
 def load(source: str) -> list[ModuleProfile]:
     """The modules an AAS environment file or an AAS repository (http...) describes."""
-    env = Repository(source).environment() if source.startswith(("http://", "https://")) else read_file(source)
+    env = read(source)
     modules = [module_profile(e) for e in environments(env) if e.is_module]
     keys = [m.key for m in modules]
     if len(set(keys)) != len(keys):

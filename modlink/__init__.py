@@ -6,15 +6,18 @@
   reconnect), asyncio only;
 - ``Module``: one module for one occupation session (occupy, commands, run a
   skill and wait for its end);
+- ``aas``: a module's AAS read into a ``Resource``: its capabilities, skills
+  and their browse paths, by following the references of the AAS;
 - ``codes``: module states, skill states and ErrorIDs.
 """
 
 from .codes import ErrorId, ModuleState, SkillState
 from .interface import Interface, discover
 from .link import Answer, Change, Link, LinkState, ModuleValues, Value
+from .aas import CapabilityLink, Resource, SkillLink
 from .module import Module, Refused, Run
 
 __all__ = [
-    "Answer", "Change", "ErrorId", "Interface", "Link", "LinkState", "Module", "ModuleState", "ModuleValues",
-    "Refused", "Run", "SkillState", "Value", "discover",
+    "Answer", "CapabilityLink", "Change", "ErrorId", "Interface", "Link", "LinkState", "Module", "ModuleState", "ModuleValues",
+    "Refused", "Resource", "Run", "SkillLink", "SkillState", "Value", "discover",
 ]

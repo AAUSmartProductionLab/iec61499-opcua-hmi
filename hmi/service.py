@@ -1,27 +1,29 @@
-"""Application logic between the OPC UA links and the Flask app.
+"""Application logic between the OPC UA links (modlink) and the web app.
 
 Keeps track of who occupies which module, logs refusals and failures, and
-builds one snapshot per browser for the HMI page.
+builds one snapshot per browser for the HMI page. Everything runs on one
+asyncio event loop: the links notify every change, the service logs the
+transitions as they come and wakes the pages that wait for a new snapshot.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from modlink import Answer, Change, Link
+
 from . import model
 from . import profiles as prof
-from .link import CallResult, OpcuaLink
 from .profiles import ModuleProfile, Param
 
 LOGGER = logging.getLogger(__name__)
 
 LOG_LIMIT = 500
-WATCH_INTERVAL = 0.1
 FAILURE_WAIT = 1.0
 
 
@@ -72,19 +74,20 @@ class HmiService:
         self.configs: list[ModuleConfig] = list(configs)
         self.sampling_ms = sampling_ms
         self._log: deque[LogEntry] = deque(maxlen=log_limit)
-        self._lock = threading.RLock()
         self._operators: dict[str, Operator] = {}
         self._last_states: dict[str, dict[str, Any]] = {}
         self._failures: dict[tuple[str, str], tuple[float, str]] = {}
-        self._reassert_lock = threading.Lock()
-        self._watch_stop = threading.Event()
-        self._watcher: threading.Thread | None = None
-        self.links: dict[str, OpcuaLink] = {}
+        self._tasks: set[asyncio.Task] = set()
+        self._changed: asyncio.Event | None = None
+        self.version = 0
+        self.links: dict[str, Link] = {}
         for endpoint, module_configs in self._grouped().items():
-            link = OpcuaLink(endpoint, [config.profile for config in module_configs], sampling_ms)
-            link.add_state_listener(self._make_listener(endpoint))
+            interfaces = [prof.interface(config.profile) for config in module_configs]
+            link = Link(endpoint, interfaces, sampling_ms)
+            link.add_listener(self._make_listener(endpoint))
             self.links[endpoint] = link
         self.modules: dict[str, ModuleConfig] = {config.profile.key: config for config in self.configs}
+        self._keys = {(config.endpoint, config.profile.root): config.profile.key for config in self.configs}
 
     def _grouped(self) -> dict[str, list[ModuleConfig]]:
         grouped: dict[str, list[ModuleConfig]] = {}
@@ -93,103 +96,107 @@ class HmiService:
         return grouped
 
     def _make_listener(self, endpoint: str) -> Any:
-        def listener(connected: bool) -> None:
-            if connected:
-                threading.Thread(
-                    target=self._reassert_occupations,
-                    args=(endpoint,),
-                    name="reoccupy",
-                    daemon=True,
-                ).start()
+        def listener(change: Change) -> None:
+            if not change.path:
+                if change.connected:
+                    self._spawn(self._reassert_occupations(endpoint))
+            else:
+                key = self._keys.get((endpoint, change.root))
+                if key is not None:
+                    try:
+                        self._watch_transition(self.modules[key].profile, change.path, change.value)
+                    except Exception:  # noqa: BLE001
+                        LOGGER.exception("transition watch failed")
+            self._touch()
 
         return listener
 
-    def start(self) -> None:
-        for link in self.links.values():
-            link.start()
-        if self._watcher is None and self.configs:
-            self._watch_stop.clear()
-            self._watcher = threading.Thread(target=self._watch_loop, name="transitions", daemon=True)
-            self._watcher.start()
+    def _spawn(self, coroutine: Any) -> None:
+        task = asyncio.get_running_loop().create_task(coroutine)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
-    def stop(self) -> None:
-        self._watch_stop.set()
-        if self._watcher is not None:
-            self._watcher.join(timeout=2)
-            self._watcher = None
-        for link in self.links.values():
-            link.stop()
+    def _touch(self) -> None:
+        """Something a page shows has changed."""
+        self.version += 1
+        if self._changed is not None:
+            self._changed.set()
 
-    def _watch_loop(self) -> None:
-        """Log transitions as they come, whether or not a page is open."""
-        while not self._watch_stop.wait(WATCH_INTERVAL):
-            for config in self.configs:
-                channel = self.link_for(config.profile.key).channels[config.profile.key]
-                values = {path: entry["value"] for path, entry in channel.snapshot().items()}
-                try:
-                    self._watch_transitions(config.profile, values)
-                except Exception:  # noqa: BLE001
-                    LOGGER.exception("transition watch failed")
+    async def changed(self, version: int, timeout: float) -> int:
+        """Wait until the version is past ``version`` (or ``timeout``); the version now."""
+        if self._changed is None:
+            self._changed = asyncio.Event()
+        if self.version == version:
+            self._changed.clear()
+            try:
+                await asyncio.wait_for(self._changed.wait(), timeout)
+            except asyncio.TimeoutError:
+                pass
+        return self.version
+
+    async def start(self) -> None:
+        self._changed = asyncio.Event()
+        for link in self.links.values():
+            await link.start()
+
+    async def stop(self) -> None:
+        for task in list(self._tasks):
+            task.cancel()
+        for link in self.links.values():
+            await link.stop()
+
+    async def wait_connected(self, timeout: float = 20.0) -> bool:
+        results = await asyncio.gather(*(link.wait_connected(timeout) for link in self.links.values()))
+        return all(results)
 
     # --- operators -------------------------------------------------------
 
     def operator(self, session: str) -> Operator:
-        with self._lock:
-            operator = self._operators.get(session)
-            if operator is None:
-                operator = Operator(session=session)
-                self._operators[session] = operator
-            operator.seen = time.time()
-            return operator
+        operator = self._operators.get(session)
+        if operator is None:
+            operator = Operator(session=session)
+            self._operators[session] = operator
+        operator.seen = time.time()
+        return operator
 
     def is_occupier(self, session: str, module_key: str) -> bool:
-        with self._lock:
-            operator = self._operators.get(session)
-            return bool(operator and operator.occupies.get(module_key))
+        operator = self._operators.get(session)
+        return bool(operator and operator.occupies.get(module_key))
 
-    def _reassert_occupations(self, endpoint: str) -> None:
-        if not self._reassert_lock.acquire(blocking=False):
+    async def _reassert_occupations(self, endpoint: str) -> None:
+        """Take the modules again for the sessions that held them before a reconnect."""
+        link = self.links.get(endpoint)
+        if link is None:
             return
-        try:
-            with self._lock:
-                sessions = [
-                    (operator.session, module_key)
-                    for operator in self._operators.values()
-                    for module_key, holds in operator.occupies.items()
-                    if holds
-                ]
-                module_configs = self._grouped().get(endpoint, [])
-            link = self.links.get(endpoint)
-            if link is None:
+        keys = {config.profile.key for config in self._grouped().get(endpoint, [])}
+        sessions = [
+            (operator.session, module_key)
+            for operator in self._operators.values()
+            for module_key, holds in operator.occupies.items()
+            if holds and module_key in keys
+        ]
+        for session, module_key in sessions:
+            if not link.connected:
                 return
-            keys = {config.profile.key for config in module_configs}
-            for session, module_key in sessions:
-                if module_key not in keys or not link.state.connected:
-                    continue
-                result = link.call(module_key, "Occupation/Occupy", [session])
-                self._note_occupation_result(module_key, session, result, holds=True, reassert=True)
-        finally:
-            self._reassert_lock.release()
+            root = self.modules[module_key].profile.root
+            result = await link.call(root, "Occupation/Occupy", session)
+            self._note_occupation_result(module_key, session, result, holds=True, reassert=True)
 
-    def _probe_occupation(self, session: str, module_key: str) -> None:
+    async def _probe_occupation(self, session: str, module_key: str) -> None:
         """Ask once whether this session still owns an occupied module.
 
         The controller publishes only Occupied, never the owner. After a restart
         of the HMI the browser comes back with its stored session id; Occupy is
         accepted only for the owner, so it tells without taking anything.
         """
-        link = self.link_for(module_key)
-        result = link.call(module_key, "Occupation/Occupy", [session])
-        if not result.ok:
-            with self._lock:
-                operator = self._operators.get(session)
-                if operator is not None:
-                    operator.probed.discard(module_key)
+        result = await self._link_call(module_key, "Occupation/Occupy", [session])
+        operator = self._operators.get(session)
+        if operator is None:
             return
-        with self._lock:
-            operator = self._operators.get(session)
-            if operator is not None:
-                operator.occupies[module_key] = result.accepted
+        if not result.ok:
+            operator.probed.discard(module_key)
+            return
+        operator.occupies[module_key] = result.accepted
         if result.accepted:
             self.log(module_key, "info", "occupation of this session taken back")
 
@@ -197,17 +204,16 @@ class HmiService:
         self,
         module_key: str,
         session: str,
-        result: CallResult,
+        result: Answer,
         holds: bool = True,
         reassert: bool = False,
     ) -> None:
-        with self._lock:
-            operator = self._operators.get(session)
-            if operator is not None:
-                if result.accepted:
-                    operator.occupies[module_key] = holds
-                elif result.error_id == model.ERR_NOT_PERMITTED:
-                    operator.occupies[module_key] = False
+        operator = self._operators.get(session)
+        if operator is not None:
+            if result.accepted:
+                operator.occupies[module_key] = holds
+            elif result.error_id == model.ERR_NOT_PERMITTED:
+                operator.occupies[module_key] = False
         if not result.ok:
             self.log(module_key, "error", f"Occupation not sent: {result.transport_error}")
         elif result.accepted:
@@ -226,25 +232,25 @@ class HmiService:
 
     # --- calls -----------------------------------------------------------
 
-    def occupy(self, session: str, module_key: str, action: str) -> dict[str, Any]:
+    async def occupy(self, session: str, module_key: str, action: str) -> dict[str, Any]:
         if action not in ("occupy", "release"):
             raise ValueError(f"unknown occupation action '{action}'")
         self.operator(session)
         profile = self.modules[module_key].profile
         path = "Occupation/Occupy" if action == "occupy" else "Occupation/Release"
         holds = action == "occupy"
-        result = self._call(module_key, path, [session], label=f"Occupation/{action.title()}")
+        result = await self._call(module_key, path, [session], label=f"Occupation/{action.title()}")
         self._note_occupation_result(module_key, session, result, holds=holds)
         return self._call_payload(result, extra={"module": profile.key, "occupier": holds and result.accepted})
 
-    def module_command(self, session: str, module_key: str, command: str) -> dict[str, Any]:
+    async def module_command(self, session: str, module_key: str, command: str) -> dict[str, Any]:
         if command not in model.MODULE_COMMANDS:
             raise ValueError(f"unknown module command '{command}'")
         self.operator(session)
-        result = self._call(module_key, f"Module/{command}", [session], label=f"Module/{command}")
+        result = await self._call(module_key, f"Module/{command}", [session], label=f"Module/{command}")
         return self._call_payload(result)
 
-    def skill_command(
+    async def skill_command(
         self,
         session: str,
         module_key: str,
@@ -279,7 +285,7 @@ class HmiService:
                     "problem": text,
                 }
             args += values
-        result = self._call(
+        result = await self._call(
             module_key, f"Skills/{skill_name}/{command}", args, label=f"Skills/{skill_name}/{command}"
         )
         return self._call_payload(result)
@@ -302,13 +308,15 @@ class HmiService:
             values.append(value)
         return values, problems
 
-    def _call(self, module_key: str, path: str, args: list[Any], label: str) -> CallResult:
-        link = self.link_for(module_key)
-        result = link.call(module_key, path, args)
+    async def _call(self, module_key: str, path: str, args: list[Any], label: str) -> Answer:
+        result = await self._link_call(module_key, path, args)
         self._log_call_result(module_key, label, result)
         return result
 
-    def _log_call_result(self, module_key: str, label: str, result: CallResult) -> None:
+    async def _link_call(self, module_key: str, path: str, args: list[Any]) -> Answer:
+        return await self.link_for(module_key).call(self.modules[module_key].profile.root, path, *args)
+
+    def _log_call_result(self, module_key: str, label: str, result: Answer) -> None:
         if not result.ok:
             self.log(module_key, "error", f"{label}: not sent ({result.transport_error})")
         elif result.accepted:
@@ -316,7 +324,7 @@ class HmiService:
         else:
             self.log(module_key, "warn", f"{label}: refused, {model.error_text(result.error_id)}")
 
-    def _call_payload(self, result: CallResult, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _call_payload(self, result: Answer, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = {
             "ok": result.ok,
             "accepted": result.accepted,
@@ -329,19 +337,18 @@ class HmiService:
             payload.update(extra)
         return payload
 
-    def link_for(self, module_key: str) -> OpcuaLink:
+    def link_for(self, module_key: str) -> Link:
         config = self.modules[module_key]
         return self.links[config.endpoint]
 
     # --- log -------------------------------------------------------------
 
     def log(self, module_key: str, level: str, text: str) -> None:
-        with self._lock:
-            self._log.append(LogEntry(ts=time.time(), level=level, module=module_key, text=text))
+        self._log.append(LogEntry(ts=time.time(), level=level, module=module_key, text=text))
+        self._touch()
 
     def log_entries(self, limit: int = 60) -> list[dict[str, Any]]:
-        with self._lock:
-            entries = list(self._log)[-limit:]
+        entries = list(self._log)[-limit:]
         return [entry.to_dict() for entry in entries]
 
     # --- snapshot --------------------------------------------------------
@@ -393,22 +400,17 @@ class HmiService:
     def _module_snapshot(self, config: ModuleConfig, operator: Operator) -> dict[str, Any]:
         profile = config.profile
         link = self.link_for(profile.key)
-        channel = link.channels[profile.key]
-        link_state = link.snapshot()["state"]
+        channel = link.module(profile.root)
+        link_state = link.state.to_dict()
         connected = bool(link_state["connected"] and channel.available)
         entries = channel.snapshot()
         values = {path: entry["value"] for path, entry in entries.items()}
         statuses = {path: entry["status"] for path, entry in entries.items()}
         occupied = bool(values.get("Occupation/Occupied"))
         if connected and occupied and profile.key not in operator.occupies:
-            with self._lock:
-                probe = profile.key not in operator.probed
+            if profile.key not in operator.probed:
                 operator.probed.add(profile.key)
-            if probe:
-                threading.Thread(
-                    target=self._probe_occupation, args=(operator.session, profile.key),
-                    name="probe-occupation", daemon=True,
-                ).start()
+                self._spawn(self._probe_occupation(operator.session, profile.key))
         occupier = operator.occupies.get(profile.key, False)
         holders = _equipment_holders(profile, values)
         module_state = values.get("Module/State")
@@ -499,23 +501,19 @@ class HmiService:
             }
         return view
 
-    def _watch_transitions(self, profile: ModuleProfile, values: dict[str, Any]) -> None:
-        """Log state changes that the operator should know about."""
-        with self._lock:
-            previous = self._last_states.setdefault(profile.key, {})
-            for path, value in values.items():
-                old = previous.get(path, KeyError)
-                if old is KeyError:
-                    previous[path] = value
-                    continue
-                previous[path] = value
-                if old == value:
-                    continue
-                self._log_transition(profile, path, old, value)
-            self._log_failures(profile, values)
+    def _watch_transition(self, profile: ModuleProfile, path: str, value: Any) -> None:
+        """Log a state change that the operator should know about."""
+        previous = self._last_states.setdefault(profile.key, {})
+        old = previous.get(path, KeyError)
+        previous[path] = value
+        if old is not KeyError and old != value:
+            self._log_transition(profile, path, old, value)
+        if path.startswith("Skills/") and path.endswith("/ErrorID"):
+            self._log_failures(profile)
 
-    def _log_failures(self, profile: ModuleProfile, values: dict[str, Any]) -> None:
+    def _log_failures(self, profile: ModuleProfile) -> None:
         """Log failed skills with their ErrorID, which may arrive a notification later."""
+        values = self._last_states.get(profile.key, {})
         for (module_key, skill), (deadline, old_name) in list(self._failures.items()):
             if module_key != profile.key:
                 continue
@@ -542,6 +540,10 @@ class HmiService:
             if new == model.SK_FAILED:
                 # logged once its ErrorID has arrived (_log_failures)
                 self._failures[(profile.key, skill)] = (time.monotonic() + FAILURE_WAIT, old_name)
+                self._log_failures(profile)
+                if (profile.key, skill) in self._failures:
+                    loop = asyncio.get_running_loop()
+                    loop.call_later(FAILURE_WAIT + 0.01, self._log_failures, profile)
             elif new == model.SK_ABORTED:
                 self.log(profile.key, "warn", f"{skill}: {old_name} -> {new_name}")
             elif new in (model.SK_RUNNING, model.SK_SUCCEEDED):

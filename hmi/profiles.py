@@ -1,7 +1,7 @@
 """Declarative description of the address space of each module.
 
 Transcribed from opcua-filling.md and opcua-stoppering.md. The profiles drive
-the OPC UA client (which nodes to resolve and monitor), the Flask API and the
+the OPC UA client (which nodes to resolve and monitor), the web API and the
 HMI page, so there is a single place to update when a module changes.
 """
 

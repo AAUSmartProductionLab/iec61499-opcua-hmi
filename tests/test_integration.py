@@ -8,6 +8,7 @@ import threading
 import time
 
 import pytest
+from fastapi.testclient import TestClient
 
 from hmi import model
 from hmi import profiles as prof
@@ -91,18 +92,15 @@ def service(simulator):
         ModuleConfig(profile=profile, endpoint=simulator.endpoint)
         for profile in (prof.FILLING, prof.STOPPERING)
     ]
-    instance = HmiService(configs, sampling_ms=100)
-    instance.start()
-    assert wait_for(lambda: all(link.state.connected for link in instance.links.values()))
-    yield instance
-    instance.stop()
+    return HmiService(configs, sampling_ms=100)
 
 
 @pytest.fixture(scope="module")
 def client(service):
-    app = create_app(service)
-    app.config.update(TESTING=True)
-    return app.test_client()
+    """The app on the test client's event loop; its lifespan starts and stops the service."""
+    with TestClient(create_app(service)) as test_client:
+        assert wait_for(lambda: all(link.connected for link in service.links.values()))
+        yield test_client
 
 
 def wait_for(predicate, timeout: float = TIMEOUT, interval: float = 0.1) -> bool:
@@ -126,8 +124,8 @@ def wait_for_any(predicate, timeout: float = TIMEOUT, interval: float = 0.05):
 
 def snapshot(client, session: str = SESSION) -> dict:
     response = client.get("/api/snapshot", headers={"X-Session-Id": session})
-    assert response.status_code == 200, response.data
-    return response.get_json()
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def view(client, key: str, session: str = SESSION) -> dict:
@@ -147,8 +145,8 @@ def value_of(module_view: dict, path: str):
 
 def post(client, path: str, payload: dict, session: str = SESSION) -> dict:
     response = client.post(path, json=payload, headers={"X-Session-Id": session})
-    assert response.status_code == 200, response.data
-    return response.get_json()
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def wait_state(client, key: str, expected: str, timeout: float = TIMEOUT) -> dict:
@@ -248,7 +246,7 @@ def idle_skill(client, key: str, skill: str) -> None:
 
 
 def test_config_lists_both_modules(client):
-    payload = client.get("/api/config").get_json()
+    payload = client.get("/api/config").json()
     assert [module["key"] for module in payload["modules"]] == ["filling", "stoppering"]
     assert payload["moduleStates"]["6"]["name"] == "Execute"
     assert payload["skillStates"]["1"] == "Running"
@@ -258,16 +256,16 @@ def test_config_lists_both_modules(client):
 def test_index_page_is_served(client):
     response = client.get("/")
     assert response.status_code == 200
-    body = response.data
-    assert b"AP2030 Modular Production HMI" in body
-    assert b"diagram.js" in body
-    assert b"hmi.js" in body
+    body = response.text
+    assert "AP2030 Modular Production HMI" in body
+    assert "diagram.js" in body
+    assert "hmi.js" in body
 
 
 def test_snapshot_without_session_is_rejected(client):
     response = client.get("/api/snapshot")
     assert response.status_code == 400
-    assert "session" in response.get_json()["error"]
+    assert "session" in response.json()["error"]
 
 
 def test_values_arrive_through_the_subscription(client):
@@ -289,7 +287,7 @@ def test_commands_are_refused_without_the_occupation(client):
     )
     assert view(client, "filling", stranger)["occupier"] is False
     assert view(client, "filling", stranger)["commands"]["Reset"] is False
-    texts = [entry["text"] for entry in client.get("/api/log?limit=20").get_json()["entries"]]
+    texts = [entry["text"] for entry in client.get("/api/log?limit=20").json()["entries"]]
     assert any("Module/Reset: refused" in text and "NotPermitted" in text for text in texts), texts
 
 
@@ -337,7 +335,7 @@ def test_parameters_out_of_range_are_not_sent(client):
     refused(result, model.ERR_OUT_OF_RANGE)
     assert result["sent"] is False
     assert "Duration" in result["problem"]
-    texts = [entry["text"] for entry in client.get("/api/log?limit=20").get_json()["entries"]]
+    texts = [entry["text"] for entry in client.get("/api/log?limit=20").json()["entries"]]
     assert any("not sent" in text and "OutOfRange" in text for text in texts), texts
 
 
@@ -637,7 +635,7 @@ def test_sensor_fault_makes_the_skill_fail_with_timeout(client, simulator):
 
 def test_log_contains_refusals_and_failures(client):
     def entries():
-        return client.get("/api/log?limit=200", headers={"X-Session-Id": SESSION}).get_json()["entries"]
+        return client.get("/api/log?limit=200", headers={"X-Session-Id": SESSION}).json()["entries"]
 
     # the transition watcher logs within its next round (0.1 s)
     assert wait_for(lambda: any("Timeout" in entry["text"] for entry in entries()), timeout=3), entries()

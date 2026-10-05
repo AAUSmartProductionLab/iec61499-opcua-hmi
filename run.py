@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import threading
 from dataclasses import replace
 from typing import Any
 
@@ -67,51 +66,55 @@ def simulated_keys(args: argparse.Namespace) -> list[str]:
     return [key.strip() for key in args.simulate.split(",") if key.strip()]
 
 
-def run_simulators(configs: list[ModuleConfig], keys: list[str], faults: list[str],
-                   endpoint: str, speed: float = 1.0) -> list[Any]:
-    """Start the simulated modules on one endpoint, in a background event loop."""
+async def start_simulators(configs: list[ModuleConfig], keys: list[str], faults: list[str],
+                           endpoint: str, speed: float = 1.0) -> Any:
+    """Start the simulated modules on one endpoint, on the running event loop."""
     from sim.fake_module import SimulatedServer
 
     module_profiles = [config.profile for config in configs if config.profile.key in keys]
     if not module_profiles:
-        return []
-    ready = threading.Event()
-    failures: list[BaseException] = []
-    servers: list[Any] = []
-    loop = asyncio.new_event_loop()
-
-    def worker() -> None:
-        asyncio.set_event_loop(loop)
-
-        async def main() -> None:
-            server = SimulatedServer(endpoint, module_profiles)
-            for module in server.modules.values():
-                module.faults.update(faults)
-                module.speed = speed
-            await server.start()
-            servers.append(server)
-            ready.set()
-            while True:
-                await asyncio.sleep(3600)
-
-        try:
-            loop.run_until_complete(main())
-        except (asyncio.CancelledError, RuntimeError):
-            pass
-        except BaseException as exc:  # noqa: BLE001
-            failures.append(exc)
-            ready.set()
-
-    thread = threading.Thread(target=worker, name="simulator", daemon=True)
-    thread.start()
-    if not ready.wait(timeout=20):
-        raise SystemExit("the simulator did not start")
-    if failures:
+        return None
+    server = SimulatedServer(endpoint, module_profiles)
+    for module in server.modules.values():
+        module.faults.update(faults)
+        module.speed = speed
+    try:
+        await server.start()
+    except OSError as exc:
         raise SystemExit(
-            f"the simulator failed to start on {endpoint}: {failures[0]} "
+            f"the simulator failed to start on {endpoint}: {exc} "
             f"(use --sim-endpoint opc.tcp://127.0.0.1:<free port>)"
+        ) from exc
+    return server
+
+
+async def serve(args: argparse.Namespace) -> None:
+    """The simulator, the OPC UA links and the web server, all on this one event loop."""
+    import uvicorn
+
+    configs = build_configs(args)
+    keys = simulated_keys(args)
+    simulator = None
+    if keys:
+        for index, config in enumerate(configs):
+            if config.profile.key in keys:
+                configs[index] = replace(config, endpoint=args.sim_endpoint)
+        simulator = await start_simulators(configs, keys, args.fault, args.sim_endpoint, args.sim_speed)
+    service = HmiService(configs, sampling_ms=args.sampling_ms)
+    app = create_app(service)
+    for config in configs:
+        LOGGER.info(
+            "module %-11s -> %s%s", config.profile.key, config.endpoint,
+            " (simulated)" if config.profile.key in keys else "",
         )
-    return servers
+    LOGGER.info("HMI on http://%s:%s", args.host, args.port)
+    server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning",
+                                           ws_ping_interval=20))
+    try:
+        await server.serve()
+    finally:
+        if simulator is not None:
+            await simulator.stop()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -120,28 +123,11 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s %(message)s",
     )
-    configs = build_configs(args)
-    keys = simulated_keys(args)
-    if keys:
-        for index, config in enumerate(configs):
-            if config.profile.key in keys:
-                configs[index] = replace(config, endpoint=args.sim_endpoint)
-        run_simulators(configs, keys, args.fault, args.sim_endpoint, args.sim_speed)
-    service = HmiService(configs, sampling_ms=args.sampling_ms)
-    service.start()
-    app = create_app(service)
-    for config in configs:
-        LOGGER.info(
-            "module %-11s -> %s%s", config.profile.key, config.endpoint,
-            " (simulated)" if config.profile.key in keys else "",
-        )
-    LOGGER.info("HMI on http://%s:%s", args.host, args.port)
+    logging.getLogger("asyncua").setLevel(logging.WARNING)
     try:
-        app.run(host=args.host, port=args.port, threaded=True, use_reloader=False)
+        asyncio.run(serve(args))
     except KeyboardInterrupt:
-        LOGGER.info("stopping")
-    finally:
-        service.stop()
+        LOGGER.info("stopped")
     return 0
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from fastapi.testclient import TestClient
 
 from hmi import profiles as prof
 from hmi.app import create_app
@@ -19,21 +20,17 @@ def restartable():
     service = HmiService([ModuleConfig(profile=prof.FILLING, endpoint=endpoint)], sampling_ms=100)
     simulator = Simulator(["filling"], port=port)
     simulator.start()
-    service.start()
-    assert wait_for(lambda: service.links[endpoint].state.connected)
-    app = create_app(service)
-    app.config.update(TESTING=True)
-    context = {"service": service, "endpoint": endpoint, "simulator": simulator,
-               "client": app.test_client()}
-    yield context
-    service.stop()
-    simulator.stop()
+    with TestClient(create_app(service)) as client:
+        assert wait_for(lambda: service.links[endpoint].state.connected)
+        context = {"service": service, "endpoint": endpoint, "simulator": simulator, "client": client}
+        yield context
+    context["simulator"].stop()
 
 
 def call(context, path: str, payload: dict) -> dict:
     response = context["client"].post(path, json=payload, headers={"X-Session-Id": SESSION})
-    assert response.status_code == 200, response.data
-    return response.get_json()
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def test_reconnect_marks_values_stale_and_takes_the_occupation_back(restartable):
@@ -75,7 +72,7 @@ def test_reconnect_marks_values_stale_and_takes_the_occupation_back(restartable)
 def test_incomplete_address_space_is_reported(restartable):
     context = restartable
     service: HmiService = context["service"]
-    channel = service.link_for("filling").channels["filling"]
+    channel = service.link_for("filling").module("Filling")
     previous = list(channel.missing)
     channel.missing.append("Skills/Ghost/State")
     channel.available = False

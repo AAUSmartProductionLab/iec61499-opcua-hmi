@@ -1,17 +1,27 @@
-"""Flask application: JSON API plus the single page HMI."""
+"""FastAPI application: JSON API and the single page HMI.
+
+The service runs on the application's event loop; the lifespan starts and
+stops it unless the caller manages it (``manage=False``).
+"""
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, Response, jsonify, render_template, request, url_for
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException
 
 from .service import HmiService
 
 LOGGER = logging.getLogger(__name__)
 
+HERE = Path(__file__).resolve().parent
 SESSION_HEADER = "X-Session-Id"
 MAX_LOG_LIMIT = 200
 
@@ -23,115 +33,123 @@ class ApiError(Exception):
         self.status = status
 
 
-def create_app(service: HmiService) -> Flask:
-    app = Flask(__name__)
-    app.config["service"] = service
+def asset(filename: str) -> str:
+    """Static file URLs carry the file's timestamp, so an edit is picked up."""
+    try:
+        stamp = int((HERE / "static" / filename).stat().st_mtime)
+    except OSError:
+        stamp = 0
+    return f"/static/{filename}?v={stamp}"
 
-    @app.context_processor
-    def asset_urls() -> dict[str, Any]:
-        """Static file URLs carry the file's timestamp, so an edit is picked up."""
 
-        def asset(filename: str) -> str:
-            path = Path(app.static_folder or "") / filename
-            try:
-                stamp = int(path.stat().st_mtime)
-            except OSError:
-                stamp = 0
-            return url_for("static", filename=filename, v=stamp)
+def check_session(value: str | None) -> str:
+    value = (value or "").strip()
+    if not value:
+        raise ApiError(f"missing session id, send it in the {SESSION_HEADER} header")
+    if len(value) > 128:
+        raise ApiError("session id is too long")
+    return value
 
-        return {"asset": asset}
 
-    @app.get("/favicon.ico")
-    def favicon() -> Any:
-        return Response(status=204)
+def create_app(service: HmiService, manage: bool = True) -> FastAPI:
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI):
+        if manage:
+            await service.start()
+        try:
+            yield
+        finally:
+            if manage:
+                await service.stop()
 
-    def session_id() -> str:
-        value = request.headers.get(SESSION_HEADER) or request.args.get("session", "")
-        value = value.strip()
-        if not value:
-            raise ApiError(f"missing session id, send it in the {SESSION_HEADER} header")
-        if len(value) > 128:
-            raise ApiError("session id is too long")
-        return value
+    app = FastAPI(title="OPC UA HMI", lifespan=lifespan, docs_url="/api/docs", redoc_url=None)
+    app.state.service = service
+    app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
+    templates = Jinja2Templates(directory=HERE / "templates")
+    templates.env.globals["asset"] = asset
 
-    def body() -> dict[str, Any]:
-        data = request.get_json(silent=True)
-        if data is None:
+    def session_id(request: Request) -> str:
+        return check_session(request.headers.get(SESSION_HEADER) or request.query_params.get("session"))
+
+    async def body(request: Request) -> dict[str, Any]:
+        try:
+            data = await request.json()
+        except ValueError:
             return {}
         if not isinstance(data, dict):
             raise ApiError("the request body must be a JSON object")
         return data
 
-    def module_key(data: dict[str, Any] | None = None) -> str:
-        key = (data or {}).get("module") or request.args.get("module", "")
+    def module_key(request: Request, data: dict[str, Any] | None = None) -> str:
+        key = (data or {}).get("module") or request.query_params.get("module", "")
         if key not in service.modules:
             raise ApiError(f"unknown module '{key}'", status=404)
         return key
 
-    @app.get("/")
-    def index() -> Any:
-        return render_template("hmi.html")
+    def limit(request: Request, name: str) -> int:
+        try:
+            return max(0, min(int(request.query_params.get(name, 60)), MAX_LOG_LIMIT))
+        except ValueError:
+            raise ApiError(f"{name} must be a number") from None
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> Response:
+        return Response(status_code=204)
+
+    @app.get("/", include_in_schema=False)
+    async def index(request: Request) -> Response:
+        return templates.TemplateResponse(request, "hmi.html")
 
     @app.get("/api/config")
-    def api_config() -> Any:
-        return jsonify(service.client_config())
+    async def api_config() -> dict[str, Any]:
+        return service.client_config()
 
     @app.get("/api/snapshot")
-    def api_snapshot() -> Any:
-        limit = min(int(request.args.get("log", 60)), MAX_LOG_LIMIT)
-        snapshot = service.snapshot(session_id())
-        snapshot["log"] = service.log_entries(limit)
-        return jsonify(snapshot)
+    async def api_snapshot(request: Request) -> dict[str, Any]:
+        snapshot = service.snapshot(session_id(request))
+        snapshot["log"] = service.log_entries(limit(request, "log"))
+        return snapshot
 
     @app.post("/api/occupation")
-    def api_occupation() -> Any:
-        data = body()
-        result = service.occupy(session_id(), module_key(data), str(data.get("action", "")))
-        return jsonify(result)
+    async def api_occupation(request: Request) -> dict[str, Any]:
+        data = await body(request)
+        return await service.occupy(session_id(request), module_key(request, data), str(data.get("action", "")))
 
     @app.post("/api/module-command")
-    def api_module_command() -> Any:
-        data = body()
-        result = service.module_command(
-            session_id(), module_key(data), str(data.get("command", ""))
-        )
-        return jsonify(result)
+    async def api_module_command(request: Request) -> dict[str, Any]:
+        data = await body(request)
+        return await service.module_command(session_id(request), module_key(request, data),
+                                            str(data.get("command", "")))
 
     @app.post("/api/skill-command")
-    def api_skill_command() -> Any:
-        data = body()
+    async def api_skill_command(request: Request) -> dict[str, Any]:
+        data = await body(request)
         params = data.get("params") or {}
         if not isinstance(params, dict):
             raise ApiError("params must be a JSON object")
-        result = service.skill_command(
-            session_id(),
-            module_key(data),
-            str(data.get("skill", "")),
-            str(data.get("command", "")),
-            params,
-        )
-        return jsonify(result)
+        return await service.skill_command(session_id(request), module_key(request, data),
+                                           str(data.get("skill", "")), str(data.get("command", "")), params)
 
     @app.get("/api/log")
-    def api_log() -> Any:
-        limit = min(int(request.args.get("limit", 60)), MAX_LOG_LIMIT)
-        return jsonify({"entries": service.log_entries(limit)})
+    async def api_log(request: Request) -> dict[str, Any]:
+        return {"entries": service.log_entries(limit(request, "limit"))}
 
-    @app.errorhandler(ApiError)
-    def handle_api_error(error: ApiError) -> Any:
-        return jsonify({"error": error.message}), error.status
+    @app.exception_handler(ApiError)
+    async def handle_api_error(_: Request, error: ApiError) -> JSONResponse:
+        return JSONResponse({"error": error.message}, status_code=error.status)
 
-    @app.errorhandler(ValueError)
-    def handle_value_error(error: ValueError) -> Any:
-        return jsonify({"error": str(error)}), 400
+    @app.exception_handler(ValueError)
+    async def handle_value_error(_: Request, error: ValueError) -> JSONResponse:
+        return JSONResponse({"error": str(error)}, status_code=400)
 
-    @app.errorhandler(404)
-    def handle_not_found(error: Any) -> Any:
-        return jsonify({"error": "not found"}), 404
+    @app.exception_handler(HTTPException)
+    async def handle_http_error(_: Request, error: HTTPException) -> JSONResponse:
+        text = "not found" if error.status_code == 404 else str(error.detail)
+        return JSONResponse({"error": text}, status_code=error.status_code)
 
-    @app.errorhandler(Exception)
-    def handle_unexpected(error: Exception) -> Any:
+    @app.exception_handler(Exception)
+    async def handle_unexpected(_: Request, error: Exception) -> JSONResponse:
         LOGGER.exception("unhandled error")
-        return jsonify({"error": f"{type(error).__name__}: {error}"}), 500
+        return JSONResponse({"error": f"{type(error).__name__}: {error}"}, status_code=500)
 
     return app

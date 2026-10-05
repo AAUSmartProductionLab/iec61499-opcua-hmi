@@ -9,7 +9,7 @@ from asyncua import Client, ua
 
 import modlink.link as link_module
 from hmi import profiles as prof
-from modlink import Interface, Link, discover
+from modlink import Interface, Link, Module, ModuleState, Refused, SkillState, discover
 from modlink.codes import ErrorId
 
 from test_integration import Simulator
@@ -90,6 +90,39 @@ def test_a_quiet_module_keeps_its_connection(filling, monkeypatch):
             await asyncio.sleep(4.0)
             assert link.connected and link.state.since == since, list(link.log)
             assert not any("disconnected" in line for line in link.log), list(link.log)
+        finally:
+            await link.stop()
+
+    run(scenario())
+
+
+def test_a_module_runs_a_skill_to_its_end_for_an_agent(filling):
+    async def scenario():
+        link = await connected(filling.endpoint, prof.interface(prof.FILLING))
+        module = Module(link, "Filling", session="agent")
+        changes = []
+        link.add_listener(lambda change: changes.append(change.path))
+        try:
+            with pytest.raises(Refused):
+                await module.command("Reset")             # not occupied yet
+            await module.occupy()
+            await module.bring_to_execute()
+            assert module.state == ModuleState.EXECUTE
+            tare = await module.run("Tare", timeout=10)
+            assert tare.succeeded and tare.error_id == 0
+            weigh = await module.run("Weigh", timeout=10)
+            assert weigh.state == SkillState.SUCCEEDED and weigh.results == {"Weight": 0.0}
+            with pytest.raises(Refused) as busy:
+                await module.skill("Dispensing", "Start", 1.0)
+                await module.skill("Dispensing", "Start", 1.0)
+            assert busy.value.answer.error_id == ErrorId.BUSY
+            await module.skill("Dispensing", "Stop")
+            stopped = await module.wait_skill_end("Dispensing", timeout=10)
+            assert (stopped.state, stopped.error_id) == (SkillState.FAILED, ErrorId.INTERRUPTED)
+            assert "Skills/Dispensing/Execute/MoveNeedleDown/State" in changes
+            await module.command("Stop")
+            await module.wait_state(ModuleState.STOPPED, timeout=30)
+            await module.release()
         finally:
             await link.stop()
 

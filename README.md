@@ -1,6 +1,6 @@
 # iec61499-opcua-hmi
 
-A small OPC UA HMI in Python (Flask + [asyncua](https://github.com/FreeOpcUa/python-opcua))
+A small OPC UA HMI in Python (FastAPI + [asyncua](https://github.com/FreeOpcUa/opcua-asyncio))
 for the IEC 61499 modules of the Eclipse 4diac controller. It shows the PackML
 module state machine, the skills with their parameters and results, the step
 progress of the sequences and the procedures, the sensors, and it operates the
@@ -52,12 +52,12 @@ simulated Stoppering module).
 ## How it works
 
 ```
-run.py                 command line entry point
+run.py                 command line entry point: simulator, links and web server on one event loop
+modlink/               async OPC UA access to the modules, for the HMI and for agents (below)
 hmi/profiles.py        declarative address space of each module (single source of truth)
 hmi/model.py           PackML states, skill states, error codes, button rules, diagrams
-hmi/link.py            OPC UA client: connect, resolve, subscribe, call, reconnect
 hmi/service.py         occupation, command results, message log, snapshot for the page
-hmi/app.py             Flask routes
+hmi/app.py             FastAPI routes and the WebSocket that pushes snapshots
 hmi/static             the HMI page: diagram.js (state machine drawings), hmi.js, hmi.css
 sim/fake_module.py     simulated controller built from the same profiles
 tests/                 unit tests and end to end tests against the simulator
@@ -68,8 +68,10 @@ tests/                 unit tests and end to end tests against the simulator
   1:State`) at connect time and again after every reconnect. The root object is
   looked up in namespace index 1 first and by browsing if that fails.
 * **Subscriptions, not polling.** All variables are monitored with one
-  subscription (sampling 100-250 ms). The browser polls the Flask snapshot every
-  250 ms, which never touches the controller. The controller notifies changes
+  subscription (sampling 100-250 ms). Every change wakes the service, which
+  pushes the snapshot to each open page over a WebSocket (`/ws`, at most every
+  100 ms); the page polls `/api/snapshot` only while the socket is down. Neither
+  touches the controller. The controller notifies changes
   only, so a module at rest is quiet: after 5 s without a notification the link
   reads one value to prove the connection, and reconnects only if that fails.
 * **Methods are called on their object.** `Occupation/Occupy` is called on the
@@ -132,6 +134,37 @@ tests/                 unit tests and end to end tests against the simulator
 * **Three panels of skills.** `Sequences` holds the module level skills with their
   step lists, `Skills` the single motions and operations.
 
+## modlink: the modules for agents
+
+`modlink` is the OPC UA side of the HMI on its own, asyncio only and without
+anything of the web app, so an agent (or a script) drives a module the same way:
+
+```python
+import asyncio
+from modlink import Link, Module, discover
+
+async def main():
+    endpoint = "opc.tcp://192.168.0.191:4840"
+    interface = await discover(endpoint, "Filling")      # or hmi.profiles.interface(...)
+    async with Link(endpoint, [interface]) as link:
+        await link.wait_connected(10)
+        filling = Module(link, "Filling", session="agent-1")
+        await filling.occupy()
+        await filling.bring_to_execute()
+        run = await filling.run("Dispensing", timeout=60)
+        print(run.state, run.error_id, run.results)   # 3 (Succeeded), 0, {'Weight': ...}
+        await filling.release()
+
+asyncio.run(main())
+```
+
+| Part | What it does |
+| --- | --- |
+| `Interface` | the variables and methods of one module by browse path; `discover` browses them from the server |
+| `Link` | one supervised connection per endpoint: resolve, one subscription, calls on the parent object, probe when quiet, reconnect with back-off; listeners and `changes()` for every value change |
+| `Module` | one module for one occupation session: `occupy`, `command`, `skill`, `run` (start and wait for the end), `wait_state` |
+| `codes` | `ModuleState`, `SkillState`, `ErrorId` as in the controller's ModLib |
+
 ## API
 
 The page uses these routes; they are handy for scripting as well. Every request
@@ -143,6 +176,7 @@ parameter for `GET /api/snapshot`).
 | `GET /api/config` | | profiles, states, error codes |
 | `GET /api/snapshot` | | values, states, button rules, log for one session |
 | `GET /api/log?limit=60` | | message log |
+| `WS /ws?session=<id>` | | the snapshot, pushed on every change |
 | `POST /api/occupation` | `{"module": "filling", "action": "occupy"\|"release"}` | `accepted`, `errorId` |
 | `POST /api/module-command` | `{"module": "filling", "command": "Reset"\|"Start"\|"Stop"\|"Abort"\|"Clear"}` | `accepted`, `errorId` |
 | `POST /api/skill-command` | `{"module": "filling", "skill": "Weigh", "command": "Start"\|"Stop"\|"Abort"\|"Reset", "params": {"Duration": 2.0}}` | `accepted`, `errorId` |
@@ -167,8 +201,8 @@ documents, including that every state of both machines appears in the diagrams.
 one (or `IEC61499_MGMT_PY`) and checks the profiles against the module specs in
 `cell/modules`, the state and error numbers against `modgen`, and the command
 rules and the skill diagram against the generated `MOD_StateLogic` and
-`SKILL_Control`; it is skipped without that checkout. `tests/test_link.py` checks
-the method calls and a quiet connection, `tests/test_simulator.py` the simulated
+`SKILL_Control`; it is skipped without that checkout. `tests/test_modlink.py`
+checks discovery, the method calls, a quiet connection and an agent running skills, `tests/test_simulator.py` the simulated
 equipment against the module specs.
 `tests/test_integration.py` and `tests/test_reconnect.py` start the simulator and
 drive the whole API: occupy/release, reset/start/execute, skill starts, equipment

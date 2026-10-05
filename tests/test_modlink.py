@@ -63,6 +63,8 @@ def test_the_link_calls_methods_on_their_object_and_sees_the_change(filling):
     async def scenario():
         link = await connected(filling.endpoint, prof.interface(prof.FILLING))
         try:
+            # Connected means the values are there.
+            assert link.value("Filling", "Module/State") == ModuleState.STOPPED
             answer = await link.call("Filling", "Occupation/Occupy", "link-session")
             assert answer.ok and answer.accepted, answer
             assert await link.wait_for("Filling", "Occupation/Occupied", bool, timeout=5)

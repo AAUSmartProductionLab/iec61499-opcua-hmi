@@ -285,9 +285,10 @@ class Link:
             try:
                 await client.connect()
                 await self._resolve(client)
+                variables = await self._read_all()
                 backoff = 1.0
                 self._set_connected()
-                await self._watch(client)
+                await self._watch(client, variables)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -337,8 +338,8 @@ class Link:
             if missing:
                 self._note(f"{root}: {len(missing)} node(s) missing: {', '.join(missing[:6])}")
 
-    async def _watch(self, client: Client) -> None:
-        assert self._stop is not None
+    async def _read_all(self) -> list[tuple[str, str, Node]]:
+        """Every resolved variable read once, so the values are there when the link is connected."""
         variables = [(root, path, self._nodes[root][path])
                      for root, module in self.modules.items()
                      for path in module.interface.variables if path in self._nodes.get(root, {})]
@@ -348,6 +349,10 @@ class Link:
                 self._store(root, path, None, f"Bad: {type(value).__name__}")
             else:
                 self._store(root, path, value)
+        return variables
+
+    async def _watch(self, client: Client, variables: list[tuple[str, str, Node]]) -> None:
+        assert self._stop is not None
         handler = _Notifications(self, {node.nodeid: (root, path) for root, path, node in variables})
         subscription = await client.create_subscription(self.sampling_ms, handler)
         try:

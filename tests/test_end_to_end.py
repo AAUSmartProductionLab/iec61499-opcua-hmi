@@ -7,6 +7,8 @@
    publishes it to an AAS server (Eclipse BaSyx).
 3. The HMI reads the module from the AAS server (hmi/aas.py), connects to the endpoint the AAS
    names and runs Dispensing through its API.
+4. An agent (modlink) runs the capability the module offers: from the capability to the skill
+   realizing it and to the browse paths that skill refers to, all read from the AAS server.
 
 Skipped unless the parts are there:
 
@@ -20,6 +22,7 @@ registration extra, and the ports FORTE and the simulator use (61499, 4840, 1502
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import signal
@@ -38,6 +41,8 @@ from hmi import aas
 from hmi import profiles as prof
 from hmi.app import create_app
 from hmi.service import HmiService, ModuleConfig
+from modlink import Module, ModuleState, SkillState
+from modlink import aas as modlink_aas
 
 from test_integration import SESSION, free_port, skill_command, to_execute, view, wait_for, wait_skill
 
@@ -159,3 +164,28 @@ def test_the_hmi_built_from_the_aas_runs_the_module(flow):
         client.post("/api/module-command", json={"module": "filling", "command": "Stop"},
                     headers={"X-Session-Id": SESSION})
         assert wait_for(lambda: view(client, "filling")["moduleState"]["name"] == "Stopped", timeout=30)
+        client.post("/api/occupation", json={"module": "filling", "action": "release"},
+                    headers={"X-Session-Id": SESSION})
+
+
+def test_an_agent_runs_an_offered_capability_through_the_references_of_the_aas(flow):
+    """Capability -> the skill realizing it -> the actions and properties it refers to -> FORTE."""
+    [filling] = [r for r in modlink_aas.load(flow["basyx"]) if r.root == "Filling"]
+    cap = filling.capability("https://smartproductionlab.aau.dk/semantics/Filling")
+    assert cap.skill == "Dispensing" and cap.properties["FillVolume"].admits(2.0)
+
+    async def scenario():
+        async with filling.connect(sampling_ms=100) as link:
+            assert await link.wait_connected(30)
+            assert link.module("Filling").missing == []
+            module = Module(link, filling.root, session="e2e-agent", resource=filling)
+            await module.occupy()
+            await module.bring_to_execute()
+            run = await module.run_capability("Filling", timeout=60)
+            assert run.skill == "Dispensing" and run.state == SkillState.SUCCEEDED, run
+            assert run.results["Weight"] == pytest.approx(2.0)
+            await module.command("Stop")
+            await module.wait_state(ModuleState.STOPPED, timeout=30)
+            await module.release()
+
+    asyncio.run(scenario())

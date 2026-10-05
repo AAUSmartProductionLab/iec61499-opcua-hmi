@@ -31,11 +31,11 @@ def free_port() -> int:
 class Simulator:
     """Runs a simulated controller on its own event loop in a background thread."""
 
-    def __init__(self, keys: list[str], port: int | None = None) -> None:
+    def __init__(self, keys: list[str], port: int | None = None, profiles=None) -> None:
         self.keys = keys
         self.port = port or free_port()
         self.endpoint = f"opc.tcp://127.0.0.1:{self.port}"
-        self.profiles = [prof.get_profile(key) for key in keys]
+        self.profiles = list(profiles) if profiles else [prof.get_profile(key) for key in keys]
         self.loop = asyncio.new_event_loop()
         self.server: SimulatedServer | None = None
         self.thread: threading.Thread | None = None

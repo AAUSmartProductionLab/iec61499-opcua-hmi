@@ -7,6 +7,7 @@ space as the hand-written ones in hmi/profiles.py, and the same skills, sequence
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -131,3 +132,32 @@ def test_modules_are_read_from_an_aas_repository(built):
         server.shutdown()
     assert [m.key for m in modules] == ["filling", "stoppering"]          # both pages of shells
     assert [m.to_dict() for m in modules] == [built["filling"].to_dict(), built["stoppering"].to_dict()]
+
+
+def test_the_hmi_runs_a_module_its_aas_describes():
+    """run.py --aas: the module, its simulator and the page all from the AAS."""
+    import run
+    from fastapi.testclient import TestClient
+
+    from hmi.app import create_app
+    from hmi.service import HmiService
+    from test_integration import Simulator, skill_command, to_execute, view, wait_for, wait_skill
+
+    configs = run.build_configs(run.parse_args(["--aas", str(FILES["filling"])]))
+    assert [c.profile.key for c in configs] == ["filling"]
+    assert configs[0].endpoint == "opc.tcp://192.168.0.191:4840"         # from the interface description
+    simulator = Simulator(["filling"], profiles=[configs[0].profile])
+    simulator.start()
+    try:
+        service = HmiService([dataclasses.replace(configs[0], endpoint=simulator.endpoint)], sampling_ms=100)
+        with TestClient(create_app(service)) as client:
+            assert wait_for(lambda: all(link.connected for link in service.links.values()))
+            config = client.get("/api/config").json()
+            assert config["modules"][0]["aasId"].endswith("/FillingModuleAAS")
+            to_execute(client, "filling")
+            assert skill_command(client, "filling", "Dispensing", "Start")["accepted"]
+            wait_skill(client, "filling", "Dispensing", "Succeeded")
+            done = view(client, "filling")["skills"]["Dispensing"]
+            assert done["results"]["Weight"]["unit"] == "g" and done["results"]["Weight"]["value"] > 0
+    finally:
+        simulator.stop()

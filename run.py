@@ -2,6 +2,8 @@
 
 Examples:
     python run.py
+    python run.py --aas http://aas-server:8081                 # every module registered there
+    python run.py --aas FillingModuleAAS.json --modules filling
     python run.py --modules filling --endpoint-filling opc.tcp://192.168.0.191:4840
     python run.py --simulate filling,stoppering
     python run.py --simulate --host 0.0.0.0 --port 8080
@@ -24,7 +26,11 @@ LOGGER = logging.getLogger("hmi.run")
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OPC UA HMI for IEC 61499 modules")
-    parser.add_argument("--modules", default="filling,stoppering", help="comma separated module keys")
+    parser.add_argument("--aas", metavar="URL|FILE",
+                        help="describe the modules by their AAS: an AAS repository (http...) or an AAS "
+                             "environment file; without it the built-in descriptions are used")
+    parser.add_argument("--modules", default=None,
+                        help="comma separated module keys (default: filling,stoppering, or all with --aas)")
     parser.add_argument("--endpoint", action="append", default=[], metavar="KEY=URL",
                         help="endpoint of a module, repeatable (e.g. filling=opc.tcp://host:4840)")
     parser.add_argument("--simulate", nargs="?", const="", default=None, metavar="KEYS",
@@ -42,8 +48,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def available_profiles(args: argparse.Namespace) -> dict[str, prof.ModuleProfile]:
+    """The modules to choose from: those the AAS describe, or the built-in ones."""
+    if args.aas:
+        from hmi import aas
+
+        try:
+            found = aas.load(args.aas)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"no module descriptions from {args.aas}: {exc}") from exc
+        if not found:
+            raise SystemExit(f"{args.aas} describes no module (no shell with Skills and an OPC UA interface)")
+        return {profile.key: profile for profile in found}
+    return dict(prof.PROFILES)
+
+
+def module_keys(args: argparse.Namespace, available: dict[str, prof.ModuleProfile]) -> list[str]:
+    if args.modules:
+        return [key.strip() for key in args.modules.split(",") if key.strip()]
+    return list(available) if args.aas else ["filling", "stoppering"]
+
+
 def build_configs(args: argparse.Namespace) -> list[ModuleConfig]:
-    keys = [key.strip() for key in args.modules.split(",") if key.strip()]
+    available = available_profiles(args)
+    keys = module_keys(args, available)
     overrides = {}
     for item in args.endpoint:
         key, _, url = item.partition("=")
@@ -52,17 +80,19 @@ def build_configs(args: argparse.Namespace) -> list[ModuleConfig]:
         overrides[key.strip()] = url.strip()
     configs = []
     for key in keys:
-        profile = prof.get_profile(key)
+        if key not in available:
+            raise SystemExit(f"unknown module '{key}', known: {', '.join(sorted(available))}")
+        profile = available[key]
         endpoint = overrides.get(key, profile.default_endpoint)
         configs.append(ModuleConfig(profile=profile, endpoint=endpoint))
     return configs
 
 
-def simulated_keys(args: argparse.Namespace) -> list[str]:
+def simulated_keys(args: argparse.Namespace, configs: list[ModuleConfig]) -> list[str]:
     if args.simulate is None:
         return []
     if not args.simulate:
-        return [key.strip() for key in args.modules.split(",") if key.strip()]
+        return [config.profile.key for config in configs]
     return [key.strip() for key in args.simulate.split(",") if key.strip()]
 
 
@@ -93,7 +123,7 @@ async def serve(args: argparse.Namespace) -> None:
     import uvicorn
 
     configs = build_configs(args)
-    keys = simulated_keys(args)
+    keys = simulated_keys(args, configs)
     simulator = None
     if keys:
         for index, config in enumerate(configs):

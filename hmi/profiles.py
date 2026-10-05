@@ -137,6 +137,7 @@ class ModuleProfile:
     notes: tuple[str, ...] = ()
     default_endpoint: str = ""
     equipment_notes: tuple[str, ...] = ()
+    aas_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -150,6 +151,7 @@ class ModuleProfile:
             "procedures": [p.to_dict() for p in self.procedures],
             "notes": list(self.notes),
             "equipmentNotes": list(self.equipment_notes),
+            "aasId": self.aas_id,
         }
 
 

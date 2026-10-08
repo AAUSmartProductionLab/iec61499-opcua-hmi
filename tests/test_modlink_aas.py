@@ -112,3 +112,72 @@ def test_an_agent_runs_a_capability_of_a_module_described_by_its_aas(filling):
         asyncio.run(scenario())
     finally:
         simulator.stop()
+
+
+# --- the modules as they are built since ARSO 0.7: a skill is its commands, primitives are in the
+# --- AAS of their component (tests/data/*07.json.gz: the module and its components in one file)
+
+FILLING07 = DATA / "FillingModule07.json.gz"
+STOPPERING07 = DATA / "StopperingModule07.json.gz"
+
+
+@pytest.fixture(scope="module")
+def filling07() -> aas.Resource:
+    [resource] = aas.load(str(FILLING07))          # the components are no modules: they have no interface
+    return resource
+
+
+def test_a_module_is_read_with_the_skills_of_its_components(filling07):
+    assert filling07.id_short == "FillingModuleAAS" and filling07.root == "Filling"
+    assert list(filling07.skills) == ["Dispensing", "Home", "MoveAxis", "Dispense", "Tare", "Weigh"]
+    assert {s.name: s.held_by for s in filling07.skills.values()} == {
+        "Dispensing": "", "Home": "FillingLinearAxisAAS", "MoveAxis": "FillingLinearAxisAAS",
+        "Dispense": "FillingPumpAAS", "Tare": "FillingScaleAAS", "Weigh": "FillingScaleAAS"}
+    dispensing = filling07.skills["Dispensing"]
+    assert dispensing.kind == "Composite" and filling07.skills["MoveAxis"].kind == "Primitive"
+    assert dispensing.meaning == "https://smartproductionlab.aau.dk/skills/Dispensing"
+    # A command leads to its action through its InterfaceReference.
+    assert dispensing.commands == {c: f"Skills/Dispensing/{c}" for c in ("Start", "Stop", "Abort", "Reset")}
+    # State, ErrorID and results are found by what they mean: the data point showing them, and the
+    # interface property the mapping feeds it from.
+    assert (dispensing.state, dispensing.error) == ("Skills/Dispensing/State", "Skills/Dispensing/ErrorID")
+    assert dispensing.results == {"Weight": "Skills/Dispensing/Results/Weight"}
+    # The parameters are the inputs of Start's Operation after the session, in call order.
+    pump = filling07.skills["Dispense"]
+    assert [(p.name, p.unit, p.minimum, p.maximum, p.default) for p in pump.parameters] == \
+        [("Volume", "mL", 0.5, 10.0, 1.0), ("FlowRate", "mL/s", 0.1, 5.0, 1.0)]
+    assert pump.arguments({"Volume": 3}) == [3.0, 1.0]
+    assert filling07.skills["MoveAxis"].commands["Start"] == "Skills/MoveAxis/Start"
+    # The module's own commands are a submodel of their own; its state and occupation data points.
+    assert filling07.module_commands == {c: f"Module/{c}" for c in ("Reset", "Start", "Stop", "Abort", "Clear")}
+    assert filling07.module_state == "Module/State"
+    assert filling07.occupation == {"Occupy": "Occupation/Occupy", "Release": "Occupation/Release",
+                                    "Occupied": "Occupation/Occupied"}
+    assert filling07.realizing("https://smartproductionlab.aau.dk/semantics/Filling") is dispensing
+    assert filling07.capability("Filling").properties["FillVolume"].admits(2.0)
+
+
+def test_the_new_structure_is_followed_by_reference_and_meaning_too():
+    env = aas.read_file(FILLING07)
+    skills = next(s for s in env["submodels"] if s["id"].endswith("FillingModuleAAS/submodels/Skills"))
+    scale = next(s for s in env["submodels"] if s["id"].endswith("FillingScaleAAS/submodels/Skills"))
+    tare_start = copy.deepcopy(aas.value(aas.at(scale, "Skills", "Tare", "Start", "InterfaceReference")))
+    aas.at(skills, "Skills", "Dispensing", "Start", "InterfaceReference")["value"] = tare_start
+    [resource] = [aas.describe(e) for e in aas.environments(env) if e.is_module]
+    assert Paths(resource).skill_command("Dispensing", "Start") == "Skills/Tare/Start"
+    # A skill whose state no data point shows cannot be watched: the AAS is refused.
+    broken = aas.read_file(FILLING07)
+    data = next(s for s in broken["submodels"] if s["idShort"] == "OperationalData")
+    point = aas.at(data, "Dispensing_State")
+    point["semanticId"]["keys"][0]["value"] += "/Elsewhere"
+    with pytest.raises(aas.AasError, match="Dispensing's state"):
+        [aas.describe(e) for e in aas.environments(broken) if e.is_module]
+
+
+def test_both_modules_of_the_new_structure_are_read():
+    [stoppering] = aas.load(str(STOPPERING07))
+    assert list(stoppering.skills) == ["Stoppering", "Home", "MoveAxis", "PressStopper", "RetractPiston"]
+    assert stoppering.realizing("Stoppering").name == "Stoppering" and stoppering.skills["Stoppering"].parameters == ()
+    # Every method and variable of the interface is in the Interface a Link is made for.
+    assert "Skills/PressStopper/Start" in stoppering.interface.methods
+    assert {"Equipment/LinearAxis/ActualPosition", "Equipment/LinearAxis/Homed"} <= set(stoppering.interface.variables)

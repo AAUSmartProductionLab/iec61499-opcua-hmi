@@ -70,7 +70,10 @@ descriptions from it (`hmi/aas.py`) instead of taking the built-in ones (`hmi/pr
 | (agents) offered capabilities and the skill realizing each | Capability Description (IDTA 02020), `CapabilityRealizedBy` referring to the skill |
 
 Only shells with a Skills submodel and an OPC UA interface are modules; nothing but plain JSON
-is read, so no AAS library is needed. `tests/test_aas.py` checks that the AAS of both modules
+is read, so no AAS library is needed. The HMI's own descriptions (`hmi/aas.py`, `hmi/profiles.py`) and its
+simulator are still those of the modules before 8 Oct 2026 (the ESP32 stations' skills, AAS in the
+structure of ARSO 0.6); `modlink.aas` reads the modules as they are built now as well
+(`tests/data/*07.json.gz`). `tests/test_aas.py` checks that the AAS of both modules
 (`tests/data`, written by `tools/aas_fixtures.py`) give the same descriptions as the built-in
 ones, and runs the simulator and the HMI on a module taken from its AAS.
 
@@ -209,7 +212,7 @@ asyncio.run(main())
 
 | Part | What it does |
 | --- | --- |
-| `aas` | reads a module's AAS into a `Resource`: offered capabilities with their values and ranges and the skill realizing each (`CapabilityRealizedBy`), every skill with the browse paths of its commands (`Methods`), state, ErrorID and results and its parameters in call order (unit, range, default), the module's commands, state and occupation, and the `Interface` of the module |
+| `aas` | reads a module's AAS into a `Resource`: offered capabilities with their values and ranges and the skill realizing each (`CapabilityRealizedBy`), every skill with the browse paths of its commands, state, ErrorID and results and its parameters in call order (unit, range, default), the module's commands, state and occupation, and the `Interface` of the module. It reads the structure of ARSO 0.7 (a skill is its commands, each with an `InterfaceReference` and an Operation; the module's primitives are in the AASs of its components, read with it; state and results are found through the mapping configuration by what a data point means) and the one before it (`Methods`, `StateReference`) |
 | `Interface` | the variables and methods of one module by browse path; `discover` browses them from the server |
 | `Link` | one supervised connection per endpoint: resolve, one subscription, calls on the parent object, probe when quiet, reconnect with back-off; listeners and `changes()` for every value change |
 | `Module` | one module for one occupation session: `occupy`, `command`, `skill`, `run` (start and wait for the end), `run_capability`, `wait_state`; browse paths from the `Resource`, else by the module's naming conventions |

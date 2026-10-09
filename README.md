@@ -73,7 +73,8 @@ Only shells with a Skills submodel and an OPC UA interface are modules; nothing 
 is read, so no AAS library is needed. The HMI's own descriptions (`hmi/aas.py`, `hmi/profiles.py`) and its
 simulator are still those of the modules before 8 Oct 2026 (the ESP32 stations' skills, AAS in the
 structure of ARSO 0.6); `modlink.aas` reads the modules as they are built now as well
-(`tests/data/*07.json.gz`). `tests/test_aas.py` checks that the AAS of both modules
+(ARSO 0.8, `tests/data/*08.json.gz`: the module's own commands are skills of the kind ModuleControl;
+and still ARSO 0.7, `*07.json.gz`). `tests/test_aas.py` checks that the AAS of both modules
 (`tests/data`, written by `tools/aas_fixtures.py`) give the same descriptions as the built-in
 ones, and runs the simulator and the HMI on a module taken from its AAS.
 

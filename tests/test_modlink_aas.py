@@ -117,13 +117,18 @@ def test_an_agent_runs_a_capability_of_a_module_described_by_its_aas(filling):
 # --- the modules as they are built since ARSO 0.7: a skill is its commands, primitives are in the
 # --- AAS of their component (tests/data/*07.json.gz: the module and its components in one file)
 
+# --- ARSO 0.8 (*08.json.gz): the kind of a skill is a supplemental id, and the module's own commands
+# --- are skills of the kind ModuleControl. Both are read, and give the same.
+
 FILLING07 = DATA / "FillingModule07.json.gz"
 STOPPERING07 = DATA / "StopperingModule07.json.gz"
+FILLING08 = DATA / "FillingModule08.json.gz"
+STOPPERING08 = DATA / "StopperingModule08.json.gz"
 
 
-@pytest.fixture(scope="module")
-def filling07() -> aas.Resource:
-    [resource] = aas.load(str(FILLING07))          # the components are no modules: they have no interface
+@pytest.fixture(scope="module", params=[FILLING07, FILLING08], ids=["0.7", "0.8"])
+def filling07(request) -> aas.Resource:
+    [resource] = aas.load(str(request.param))      # the components are no modules: they have no interface
     return resource
 
 
@@ -148,7 +153,8 @@ def test_a_module_is_read_with_the_skills_of_its_components(filling07):
         [("Volume", "mL", 0.5, 10.0, 1.0), ("FlowRate", "mL/s", 0.1, 5.0, 1.0)]
     assert pump.arguments({"Volume": 3}) == [3.0, 1.0]
     assert filling07.skills["MoveAxis"].commands["Start"] == "Skills/MoveAxis/Start"
-    # The module's own commands are a submodel of their own; its state and occupation data points.
+    # The module's own commands (a submodel in 0.7, skills of a kind of their own in 0.8) are not
+    # among the skills; its state and occupation are data points.
     assert filling07.module_commands == {c: f"Module/{c}" for c in ("Reset", "Start", "Stop", "Abort", "Clear")}
     assert filling07.module_state == "Module/State"
     assert filling07.occupation == {"Occupy": "Occupation/Occupy", "Release": "Occupation/Release",
@@ -157,8 +163,9 @@ def test_a_module_is_read_with_the_skills_of_its_components(filling07):
     assert filling07.capability("Filling").properties["FillVolume"].admits(2.0)
 
 
-def test_the_new_structure_is_followed_by_reference_and_meaning_too():
-    env = aas.read_file(FILLING07)
+@pytest.mark.parametrize("source", [FILLING07, FILLING08], ids=["0.7", "0.8"])
+def test_the_new_structure_is_followed_by_reference_and_meaning_too(source):
+    env = aas.read_file(source)
     skills = next(s for s in env["submodels"] if s["id"].endswith("FillingModuleAAS/submodels/Skills"))
     scale = next(s for s in env["submodels"] if s["id"].endswith("FillingScaleAAS/submodels/Skills"))
     tare_start = copy.deepcopy(aas.value(aas.at(scale, "Skills", "Tare", "Start", "InterfaceReference")))
@@ -166,7 +173,7 @@ def test_the_new_structure_is_followed_by_reference_and_meaning_too():
     [resource] = [aas.describe(e) for e in aas.environments(env) if e.is_module]
     assert Paths(resource).skill_command("Dispensing", "Start") == "Skills/Tare/Start"
     # A skill whose state no data point shows cannot be watched: the AAS is refused.
-    broken = aas.read_file(FILLING07)
+    broken = aas.read_file(source)
     data = next(s for s in broken["submodels"] if s["idShort"] == "OperationalData")
     point = aas.at(data, "Dispensing_State")
     point["semanticId"]["keys"][0]["value"] += "/Elsewhere"
@@ -174,8 +181,22 @@ def test_the_new_structure_is_followed_by_reference_and_meaning_too():
         [aas.describe(e) for e in aas.environments(broken) if e.is_module]
 
 
-def test_both_modules_of_the_new_structure_are_read():
-    [stoppering] = aas.load(str(STOPPERING07))
+def test_a_command_of_the_module_is_found_through_its_start():
+    """ARSO 0.8: Reset is a skill of the kind ModuleControl; what calls it is its Start's action."""
+    env = aas.read_file(FILLING08)
+    skills = next(s for s in env["submodels"] if s["id"].endswith("FillingModuleAAS/submodels/Skills"))
+    assert "Module" not in [s["idShort"] for s in env["submodels"]]
+    reset = aas.at(skills, "Skills", "Reset")
+    assert aas.kind_of(reset) == "ModuleControl" and aas.semantic(reset) == "https://smartproductionlab.aau.dk/skill"
+    clear = copy.deepcopy(aas.value(aas.at(skills, "Skills", "Clear", "Start", "InterfaceReference")))
+    aas.at(reset, "Start", "InterfaceReference")["value"] = clear
+    [resource] = [aas.describe(e) for e in aas.environments(env) if e.is_module]
+    assert resource.module_commands["Reset"] == "Module/Clear" and "Reset" not in resource.skills
+
+
+@pytest.mark.parametrize("source", [STOPPERING07, STOPPERING08], ids=["0.7", "0.8"])
+def test_both_modules_of_the_new_structure_are_read(source):
+    [stoppering] = aas.load(str(source))
     assert list(stoppering.skills) == ["Stoppering", "Home", "MoveAxis", "PressStopper", "RetractPiston"]
     assert stoppering.realizing("Stoppering").name == "Stoppering" and stoppering.skills["Stoppering"].parameters == ()
     # Every method and variable of the interface is in the Interface a Link is made for.

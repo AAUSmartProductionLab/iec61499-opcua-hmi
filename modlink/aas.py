@@ -5,12 +5,13 @@ each other:
 
 - **Capability Description** (IDTA 02020): the capabilities it offers, with their values and
   ranges, each realized by a skill (CapabilityRealizedBy, a reference into the Skills submodel);
-- **Skills** (ARSO 0.7): a skill is its commands (Start, Stop, Abort, Reset), each with the
+- **Skills** (ARSO 0.8): a skill is its commands (Start, Stop, Abort, Reset), each with the
   reference to the action that calls it (InterfaceReference) and an Operation whose variables are
   the parameters (unit, range, default) and the results. The module's own skills are those it
   composes; the primitives are in the AAS of the component they move, and refer to actions of the
-  module's interface;
-- **Module** (ARSO 0.7): the module's own commands in the same shape;
+  module's interface. What kind a skill is, is a supplemental semantic id (Primitive, Composite,
+  ModuleControl). The module's own commands (Occupy, Release, Reset, Start, Stop, Abort, Clear)
+  are skills of the kind ModuleControl, each called by its Start;
 - **Asset Interfaces Mapping Configuration** with **Operational Data**: which property of the
   interface shows a skill's state, its ErrorID and its results. A data point means what it shows
   (its semantic id), and so does the Operation variable of a result;
@@ -21,8 +22,10 @@ each other:
 ``Interface`` for a ``Link`` and, per skill and capability, the browse paths to call and to watch.
 ``load`` reads the resources from an AAS environment file or an AAS repository (HTTP API, part 2).
 
-An AAS in the structure before ARSO 0.7 (a skill with Methods, StateReference, ErrorReference,
-Results and Parameters; the module's commands inside the Skills submodel) is still read.
+Older structures are still read: ARSO 0.7 (the kind of a skill as its semantic id, the module's
+commands in a submodel of their own, Module) and the one before (a skill with Methods,
+StateReference, ErrorReference, Results and Parameters; the module's commands inside the Skills
+submodel).
 
 Plain JSON in, plain dataclasses out: no AAS library is needed.
 """
@@ -89,6 +92,15 @@ def value(element: dict | None, default: Any = None) -> Any:
 def semantic(element: dict | None) -> str:
     keys = ((element or {}).get("semanticId") or {}).get("keys") or []
     return keys[0].get("value", "") if keys else ""
+
+
+def kind_of(skill: dict) -> str:
+    """Primitive, Composite or ModuleControl: a supplemental semantic id since ARSO 0.8, the
+    semantic id itself in 0.7."""
+    for meaning in [*meanings(skill), semantic(skill)]:
+        if meaning.rsplit("/", 1)[-1] in ("Primitive", "Composite", "ModuleControl"):
+            return meaning.rsplit("/", 1)[-1]
+    return "Primitive"
 
 
 def meanings(element: dict) -> list[str]:
@@ -369,7 +381,8 @@ def describe(env: Environment) -> Resource:
             return reference if reference and reference["keys"][0]["value"] == interface_id else None
 
         # The module's own skills, and those of the shells beside it that this module carries out.
-        own = children(at(skills_sm, "Skills"))
+        own = [skill for skill in children(at(skills_sm, "Skills")) if kind_of(skill) != "ModuleControl"]
+        control = [skill for skill in children(at(skills_sm, "Skills")) if kind_of(skill) == "ModuleControl"]
         beside = [(skill, holder) for holder in env.others.values() if at(holder, "Skills") is not None
                   for skill in children(at(holder, "Skills")) if any(called(at(skill, c)) for c in COMMANDS)]
         for skill, holder in [*[(skill, None) for skill in own], *beside]:
@@ -384,7 +397,7 @@ def describe(env: Environment) -> Resource:
                                for v in inputs[1:])     # after the session
             meaning = value(at(skill, "SemanticId"), "")
             skills[skill_name] = SkillLink(
-                name=skill_name, kind="Composite" if semantic(skill).endswith("/Composite") else "Primitive",
+                name=skill_name, kind=kind_of(skill),
                 commands=commands, state=watched(f"{meaning}/State", f"{skill_name}'s state"),
                 error=watched(f"{meaning}/ErrorID", f"{skill_name}'s ErrorID", needed=False),
                 results={v["idShort"]: watched(semantic(v), f"{skill_name}'s result {v['idShort']}") for v in outputs[2:]},
@@ -395,7 +408,12 @@ def describe(env: Environment) -> Resource:
                 continue
             target = occupation if command["idShort"] in OCCUPATION else module_commands
             target[command["idShort"]] = browse(called(command), f"the module's {command['idShort']}")
-        module_state = watched(MODULE_STATE, "the module state", needed=machine is not None)
+        for skill in control:                              # ARSO 0.8: a command of the module is called by its Start
+            if called(at(skill, "Start")) is None:
+                continue
+            target = occupation if skill["idShort"] in OCCUPATION else module_commands
+            target[skill["idShort"]] = browse(called(at(skill, "Start")), f"the module's {skill['idShort']}")
+        module_state = watched(MODULE_STATE, "the module state", needed=machine is not None or bool(control))
         if OCCUPIED in shown:
             occupation["Occupied"] = watched(OCCUPIED, "the occupation")
     for skill in ([] if by_commands else children(at(skills_sm, "Skills"))):

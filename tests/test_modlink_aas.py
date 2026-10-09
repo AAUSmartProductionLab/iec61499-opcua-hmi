@@ -194,6 +194,25 @@ def test_a_command_of_the_module_is_found_through_its_start():
     assert resource.module_commands["Reset"] == "Module/Clear" and "Reset" not in resource.skills
 
 
+def test_a_skill_that_was_built_online_is_reached_like_the_others():
+    """tests/data/FillingModule08-reconfigured.json.gz: the filling module after a skill written in
+    the web UI's skill editor (DoubleDose: two doses, at most 5 mL) was built on the running module
+    from its AAS and recorded (iec61499-mgmt-py: modsync reconfigure). The record gave the skill its
+    actions, properties, data points and mappings, so it is found by reference and meaning."""
+    [resource] = aas.load(str(DATA / "FillingModule08-reconfigured.json.gz"))
+    assert list(resource.skills) == ["Dispensing", "DoubleDose", "Home", "MoveAxis", "Dispense", "Tare", "Weigh"]
+    made = resource.skills["DoubleDose"]
+    assert made.kind == "Composite" and made.meaning == "https://smartproductionlab.aau.dk/skills/DoubleDose"
+    assert made.commands == {c: f"Skills/DoubleDose/{c}" for c in ("Start", "Stop", "Abort", "Reset")}
+    assert (made.state, made.error) == ("Skills/DoubleDose/State", "Skills/DoubleDose/ErrorID")
+    assert made.results == {"Weight": "Skills/DoubleDose/Results/Weight"}
+    assert [(p.name, p.unit, p.minimum, p.maximum, p.default) for p in made.parameters] == [("Volume", "mL", 0.5, 5.0, 0.5)]
+    assert {"Skills/DoubleDose/Start", "Skills/DoubleDose/Reset"} <= set(resource.interface.methods)
+    assert "Skills/DoubleDose/Execute/Dispense_2/State" in resource.interface.variables
+    # The skill it was made from is untouched, and still realizes the capability.
+    assert resource.realizing("Filling").name == "Dispensing"
+
+
 @pytest.mark.parametrize("source", [STOPPERING07, STOPPERING08], ids=["0.7", "0.8"])
 def test_both_modules_of_the_new_structure_are_read(source):
     [stoppering] = aas.load(str(source))

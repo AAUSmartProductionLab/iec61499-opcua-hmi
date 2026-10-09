@@ -5,6 +5,9 @@ the module's AAS and one for every component of it, in one environment), without
 specifications (the class and attribute names aas-model repeats on every element, which nothing
 here reads). ``*07.json.gz`` are the same modules in ARSO 0.7 (8 Oct 2026: the kind of a skill as its
 semantic id, a Module submodel), kept to test that they are still read.
+``FillingModule08-reconfigured.json.gz`` is the filling module after a skill written in the web
+UI's skill editor was built online and recorded (written by iec61499-mgmt-py, 9 Oct 2026; not by
+this tool).
 ``FillingModuleAAS.json.gz`` and ``StopperingModuleAAS.json.gz`` are the modules as
 they were before 8 Oct 2026 (ARSO 0.6, the ESP32 stations' skills), which the HMI's built-in
 descriptions and its simulator still are; they cannot be written again. Needs a checkout of iec61499-mgmt-py next to this repository (or

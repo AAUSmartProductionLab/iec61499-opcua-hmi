@@ -5,13 +5,14 @@ each other:
 
 - **Capability Description** (IDTA 02020): the capabilities it offers, with their values and
   ranges, each realized by a skill (CapabilityRealizedBy, a reference into the Skills submodel);
-- **Skills** (ARSO 0.8): a skill is its commands (Start, Stop, Abort, Reset), each with the
+- **Skills** (ARSO 0.9): a skill is its commands (Start, Stop, Abort, Reset), each with the
   reference to the action that calls it (InterfaceReference) and an Operation whose variables are
   the parameters (unit, range, default) and the results. The module's own skills are those it
   composes; the primitives are in the AAS of the component they move, and refer to actions of the
-  module's interface. What kind a skill is, is a supplemental semantic id (Primitive, Composite,
-  ModuleControl). The module's own commands (Occupy, Release, Reset, Start, Stop, Abort, Clear)
-  are skills of the kind ModuleControl, each called by its Start;
+  module's interface. What kind a skill is (Primitive, Composite, ModuleControl) and what it does
+  (its type) are supplemental semantic ids. The skills are the submodel's own elements, beside
+  its Errors. The module's own commands (Occupy, Release, Reset, Start, Stop, Abort, Clear) are
+  skills of the kind ModuleControl, each called by its Start;
 - **Asset Interfaces Mapping Configuration** with **Operational Data**: which property of the
   interface shows a skill's state, its ErrorID and its results. A data point means what it shows
   (its semantic id), and so does the Operation variable of a result;
@@ -22,7 +23,8 @@ each other:
 ``Interface`` for a ``Link`` and, per skill and capability, the browse paths to call and to watch.
 ``load`` reads the resources from an AAS environment file or an AAS repository (HTTP API, part 2).
 
-Older structures are still read: ARSO 0.7 (the kind of a skill as its semantic id, the module's
+Older structures are still read: ARSO 0.8 (the skills in a collection Skills, what a skill does
+a property SemanticId), ARSO 0.7 (the kind of a skill as its semantic id, the module's
 commands in a submodel of their own, Module) and the one before (a skill with Methods,
 StateReference, ErrorReference, Results and Parameters; the module's commands inside the Skills
 submodel).
@@ -50,6 +52,7 @@ CAPABILITY_DESCRIPTION = "https://admin-shell.io/idta/SubmodelTemplate/Capabilit
 CAPABILITY = "https://admin-shell.io/idta/CapabilityDescription"
 OCCUPATION = ("Occupy", "Release")
 COMMANDS = ("Start", "Stop", "Abort", "Reset")
+KINDS = ("Primitive", "Composite", "ModuleControl")
 # What the two values every resource publishes mean.
 MODULE_STATE = "https://w3id.org/2026/apex/semantic/state/operational"
 OCCUPIED = "https://w3id.org/2026/apex/semantic/state/occupied"
@@ -98,13 +101,29 @@ def kind_of(skill: dict) -> str:
     """Primitive, Composite or ModuleControl: a supplemental semantic id since ARSO 0.8, the
     semantic id itself in 0.7."""
     for meaning in [*meanings(skill), semantic(skill)]:
-        if meaning.rsplit("/", 1)[-1] in ("Primitive", "Composite", "ModuleControl"):
+        if meaning.rsplit("/", 1)[-1] in KINDS:
             return meaning.rsplit("/", 1)[-1]
     return "Primitive"
 
 
 def meanings(element: dict) -> list[str]:
     return [ref["keys"][0]["value"] for ref in element.get("supplementalSemanticIds") or [] if ref.get("keys")]
+
+
+def type_of(skill: dict) -> str:
+    """What a skill does: the supplemental semantic id beside its kind since ARSO 0.9, the property
+    SemanticId before."""
+    return next((m for m in meanings(skill) if m.rsplit("/", 1)[-1] not in KINDS),
+                value(at(skill, "SemanticId"), ""))
+
+
+def skills_in(held: dict | None) -> list[dict]:
+    """The skills of a Skills submodel: its own elements since ARSO 0.9 (a skill has a semantic id),
+    those of its collection Skills before."""
+    inner = child(held, "Skills")
+    if inner is not None and not semantic(inner):
+        return children(inner)
+    return [c for c in children(held) if semantic(c)]
 
 
 def qualifier(element: dict | None, name: str) -> str | None:
@@ -241,7 +260,7 @@ class SkillLink:
     results: dict[str, str] = field(default_factory=dict)
     parameters: tuple[Parameter, ...] = ()   # in the call order of Start, after the session
     description: str = ""
-    meaning: str = ""                        # what the skill does (its SemanticId)
+    meaning: str = ""                        # what the skill does (its type)
     held_by: str = ""                        # the AAS whose Skills describe it, if not the module's
 
     def arguments(self, values: dict[str, float] | None = None) -> list[float]:
@@ -355,7 +374,7 @@ def describe(env: Environment) -> Resource:
     module_commands: dict[str, str] = {}
     module_state = ""
     machine = env.submodel("Module")
-    by_commands = machine is not None or any(at(s, "Start") is not None for s in children(at(skills_sm, "Skills")))
+    by_commands = machine is not None or any(at(s, "Start") is not None for s in skills_in(skills_sm))
     if by_commands:
         # ARSO 0.7. What a data point means -> the interface property that feeds it.
         shown: dict[str, dict] = {}
@@ -381,10 +400,10 @@ def describe(env: Environment) -> Resource:
             return reference if reference and reference["keys"][0]["value"] == interface_id else None
 
         # The module's own skills, and those of the shells beside it that this module carries out.
-        own = [skill for skill in children(at(skills_sm, "Skills")) if kind_of(skill) != "ModuleControl"]
-        control = [skill for skill in children(at(skills_sm, "Skills")) if kind_of(skill) == "ModuleControl"]
-        beside = [(skill, holder) for holder in env.others.values() if at(holder, "Skills") is not None
-                  for skill in children(at(holder, "Skills")) if any(called(at(skill, c)) for c in COMMANDS)]
+        own = [skill for skill in skills_in(skills_sm) if kind_of(skill) != "ModuleControl"]
+        control = [skill for skill in skills_in(skills_sm) if kind_of(skill) == "ModuleControl"]
+        beside = [(skill, holder) for holder in env.others.values() if holder.get("idShort") == "Skills"
+                  for skill in skills_in(holder) if any(called(at(skill, c)) for c in COMMANDS)]
         for skill, holder in [*[(skill, None) for skill in own], *beside]:
             skill_name = skill["idShort"]
             commands = {c: browse(called(at(skill, c)), f"{skill_name}'s {c}") for c in COMMANDS if called(at(skill, c))}
@@ -395,7 +414,7 @@ def describe(env: Environment) -> Resource:
             parameters = tuple(Parameter(v["idShort"], qualifier(v, "Unit") or "", number(qualifier(v, "Minimum")),
                                          number(qualifier(v, "Maximum")), number(qualifier(v, "Default") or value(v)))
                                for v in inputs[1:])     # after the session
-            meaning = value(at(skill, "SemanticId"), "")
+            meaning = type_of(skill)
             skills[skill_name] = SkillLink(
                 name=skill_name, kind=kind_of(skill),
                 commands=commands, state=watched(f"{meaning}/State", f"{skill_name}'s state"),
@@ -416,7 +435,7 @@ def describe(env: Environment) -> Resource:
         module_state = watched(MODULE_STATE, "the module state", needed=machine is not None or bool(control))
         if OCCUPIED in shown:
             occupation["Occupied"] = watched(OCCUPIED, "the occupation")
-    for skill in ([] if by_commands else children(at(skills_sm, "Skills"))):
+    for skill in ([] if by_commands else skills_in(skills_sm)):
         skill_name = skill["idShort"]
         if skill_name in OCCUPATION:
             occupation[skill_name] = browse(value(at(skill, "InterfaceReference")), f"{skill_name}'s action")

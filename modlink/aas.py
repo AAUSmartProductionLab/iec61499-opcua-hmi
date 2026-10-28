@@ -281,7 +281,7 @@ class SkillLink:
 
 @dataclass(frozen=True)
 class CapabilityValue:
-    """One property of an offered capability: a value or a range."""
+    """One property of an offered capability: a value, the values it takes, or a range."""
 
     name: str
     meaning: str
@@ -289,9 +289,12 @@ class CapabilityValue:
     minimum: float | None = None
     maximum: float | None = None
     unit: str = ""
+    values: tuple[str, ...] = ()
 
     def admits(self, required: Any) -> bool:
         """Whether a required value is within what is offered."""
+        if self.values:
+            return str(required) in self.values
         if self.value is not None:
             return str(required) == self.value
         wanted = number(required)
@@ -490,11 +493,13 @@ def describe(env: Environment) -> Resource:
             for pset in (c for c in children(box) if semantic(c) == f"{CAPABILITY}/PropertySet/1/0"):
                 for item in children(pset):
                     for prop in children(item):
+                        listed = prop["modelType"] == "SubmodelElementList"
                         values[item["idShort"]] = CapabilityValue(
                             item["idShort"], next(iter(meanings(prop)), ""),
-                            value=None if prop["modelType"] == "Range" else str(value(prop, "")),
+                            value=None if prop["modelType"] == "Range" or listed else str(value(prop, "")),
                             minimum=number(prop.get("min")), maximum=number(prop.get("max")),
-                            unit=qualifier(prop, "Unit") or "")
+                            unit=qualifier(prop, "Unit") or "",
+                            values=tuple(str(value(v, "")) for v in prop.get("value") or []) if listed else ())
             capabilities[box["idShort"]] = CapabilityLink(box["idShort"], tuple(meanings(capability)),
                                                           skill["idShort"], values)
 

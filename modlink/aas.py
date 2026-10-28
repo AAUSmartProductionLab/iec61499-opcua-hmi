@@ -13,9 +13,10 @@ each other:
   (its type) are supplemental semantic ids. The skills are the submodel's own elements, beside
   its Errors. The module's own commands (Occupy, Release, Reset, Start, Stop, Abort, Clear) are
   skills of the kind ModuleControl, each called by its Start;
-- **Asset Interfaces Mapping Configuration** with **Operational Data**: which property of the
-  interface shows a skill's state, its ErrorID and its results. A data point means what it shows
-  (its semantic id), and so does the Operation variable of a result;
+- **Asset Interfaces Mapping Configuration** with **Variables** (Operational Data before): which
+  property of the interface shows a skill's state, its ErrorID and its results. A data point means
+  what it shows (its supplemental semantic id in aas-model's Variables, its semantic id before), and
+  so does the Operation variable of a result;
 - **Asset Interfaces Description** (AID): the OPC UA endpoint and the browse path of every action
   and property.
 
@@ -377,13 +378,18 @@ def describe(env: Environment) -> Resource:
     by_commands = machine is not None or any(at(s, "Start") is not None for s in skills_in(skills_sm))
     if by_commands:
         # ARSO 0.7. What a data point means -> the interface property that feeds it.
-        shown: dict[str, dict] = {}
+        fed: list[tuple[dict, dict]] = []
         for config in children(at(env.submodel("AssetInterfacesMappingConfiguration"), "MappingConfigurations")):
             sources = [env.resolve(value(at(c, "Source"))) for c in children(at(config, "Sources"))]
             sinks = [env.resolve(value(at(c, "Sink"))) for c in children(at(config, "Sinks"))]
-            for source, sink in zip(sources, sinks):
-                if source is not None and sink is not None and semantic(sink):
-                    shown.setdefault(semantic(sink), source)
+            fed += [(source, sink) for source, sink in zip(sources, sinks) if source is not None and sink is not None]
+        # A data point's semantic id first (Operational Data), then its supplemental ones (Variables).
+        shown: dict[str, dict] = {}
+        for meant in (lambda sink: [semantic(sink)], meanings):
+            for source, sink in fed:
+                for meaning in meant(sink):
+                    if meaning:
+                        shown.setdefault(meaning, source)
 
         def watched(meaning: str, what: str, needed: bool = True) -> str:
             if meaning not in shown:

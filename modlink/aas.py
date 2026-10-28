@@ -138,6 +138,14 @@ def number(raw: Any) -> float | None:
         return None
 
 
+def record_of(env: "Environment", segment: dict | None) -> dict | None:
+    """The Record of the time series a reference to one of its segments (``.../<series>/Segments/<segment>``)
+    is in: the fields a row of it has."""
+    keys = (segment or {}).get("keys") or []
+    series = env.resolve({**segment, "keys": keys[:-2]}) if len(keys) > 2 else None
+    return at(series, "Metadata", "Record")
+
+
 def operation_variables(operation: dict | None, kind: str) -> list[dict]:
     """The variables of an Operation (``inputVariables``, ``outputVariables``), in their order."""
     return [v["value"] for v in (operation or {}).get(kind) or []]
@@ -380,11 +388,20 @@ def describe(env: Environment) -> Resource:
     machine = env.submodel("Module")
     by_commands = machine is not None or any(at(s, "Start") is not None for s in skills_in(skills_sm))
     if by_commands:
-        # ARSO 0.7. What a data point means -> the interface property that feeds it.
+        # ARSO 0.7. What a data point means -> the interface property that feeds it. A data point is
+        # a Property the mapping writes (Operational Data, Variables), or the field of a time series
+        # whose segment the mapping writes a row to: then each source is the field of its SourceId.
         fed: list[tuple[dict, dict]] = []
         for config in children(at(env.submodel("AssetInterfacesMappingConfiguration"), "MappingConfigurations")):
-            sources = [env.resolve(value(at(c, "Source"))) for c in children(at(config, "Sources"))]
-            sinks = [env.resolve(value(at(c, "Sink"))) for c in children(at(config, "Sinks"))]
+            given = children(at(config, "Sources"))
+            sources = [env.resolve(value(at(c, "Source"))) for c in given]
+            references = [value(at(c, "Sink")) for c in children(at(config, "Sinks"))]
+            sinks = [env.resolve(r) for r in references]
+            record = next((record_of(env, r) for r, s in zip(references, sinks) if s is not None and child(s, "InfluxDb2Target")), None)
+            if record is not None:
+                fields = [child(record, value(at(c, "SourceId"), "")) for c in given]
+                fed += [(source, field) for source, field in zip(sources, fields) if source is not None and field is not None]
+                continue
             fed += [(source, sink) for source, sink in zip(sources, sinks) if source is not None and sink is not None]
         # A data point's semantic id first (Operational Data), then its supplemental ones (Variables).
         shown: dict[str, dict] = {}

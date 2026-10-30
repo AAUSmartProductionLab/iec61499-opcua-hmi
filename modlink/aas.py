@@ -507,6 +507,9 @@ def describe(env: Environment) -> Resource:
             realized = [rel.get("second") for relations in children(box)
                         if semantic(relations) == f"{CAPABILITY}/CapabilityRelations/1/0"
                         for rel in children(relations) if semantic(rel) == f"{CAPABILITY}/CapabilityRealizedBy/1/0"]
+            # Realized by no skill: nothing to run (Receiving, Releasing: the resource's custody changes).
+            if not realized:
+                continue
             skill = next((env.resolve(ref) for ref in realized if env.resolve(ref) is not None), None)
             if skill is None or skill.get("idShort") not in skills:
                 raise AasError(f"{name}: capability {box['idShort']} is not realized by a skill of the Skills submodel")

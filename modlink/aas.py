@@ -500,6 +500,10 @@ def describe(env: Environment) -> Resource:
                 for q in capability.get("qualifiers") or [])
             if not offered:
                 continue
+            # Offered after a reconfiguration: its skill is only described, with no interface yet.
+            if any(q.get("type") == "Availability" and q.get("value") == "AfterReconfiguration"
+                   for q in capability.get("qualifiers") or []):
+                continue
             realized = [rel.get("second") for relations in children(box)
                         if semantic(relations) == f"{CAPABILITY}/CapabilityRelations/1/0"
                         for rel in children(relations) if semantic(rel) == f"{CAPABILITY}/CapabilityRealizedBy/1/0"]
